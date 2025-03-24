@@ -1,6 +1,6 @@
-[![License: GPL-3.0](http://img.shields.io/:license-gpl3-blue.svg)](https://opensource.org/licenses/GPL-3.0)
+# HTTP Library Adapter for Emacs.
 
-pdd is an HTTP Library Adapter for Emacs. It support `url.el` and [plz.el](https://github.com/alphapapa/plz.el), and can be extended.
+It support `url.el` and [plz.el](https://github.com/alphapapa/plz.el), and can be extended.
 
 - Its API is simple and uniform
 - Support both **sync/async** request
@@ -68,12 +68,12 @@ And try to send requests like this:
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (print res))
-  :fail (lambda (err) (message "FAIL")))
+  :fail (lambda (err) (message "%s" err)))
 
 ;; Use `pdd-default-error-handler' to catch error when :fail is absent
 ;; Set its value globally, or just dynamically bind it with let
 (let ((pdd-default-error-handler
-       (lambda (err) (message "Crying %s..." (cadr err)))))
+       (lambda (_ code) (message "Crying for %s..." code))))
   (pdd "https://httpbin.org/post-error"
     :data '(("key" . "value"))
     :done (lambda (res) (print res))))
@@ -88,7 +88,6 @@ And try to send requests like this:
   :headers '(("Content-Type" . "application/json")) ; can use abbrev as :headers '(json)
   :data '(("key" . "value"))         ; this will be encoded to json string automatelly
   :done (lambda (json) (print json)) ; cause of auto parse, the argument `json' is an alist
-  :fail (lambda (err) (print err))
   :timeout 0.9 :retry 5)
 
 ;; Use :filter to provide logic as every chunk back (for stream feature)
@@ -96,23 +95,14 @@ And try to send requests like this:
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :filter (lambda () (message "%s" (buffer-size)))
-  :done (lambda (res) (print res))
-  :fail (lambda (err) (message "FAIL")))
+  :done (lambda (res) (print res)))
 
 ;; The function :fine will run at last, no matter done or fail, everything is fine
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (print res))
-  :fail (lambda (err) (message "FAIL"))
+  :fail (lambda (err) (message "%s" err))
   :fine (lambda () (message "kindness, please")))
-
-;; Arguments of :done are smart, it can be zero, one, two, three or four
-;; If zero argument, current buffer is the one with raw responsed string
-(pdd "https://httpbin.org/ip" :done (lambda () (message "%s" (buffer-string))))
-(pdd "https://httpbin.org/ip" :done (lambda (body) (message "IP: %s" (cdar body))))
-(pdd "https://httpbin.org/ip" :done (lambda (_body headers) (print headers)))
-(pdd "https://httpbin.org/ip" :done (lambda (_ _ status-code) (print status-code)))
-(pdd "https://httpbin.org/ip" :done (lambda (_ _ _ http-version) (print http-version)))
 
 ;; Specific method
 (pdd "https://httpbin.org/uuid")
@@ -130,6 +120,21 @@ And try to send requests like this:
 ;; Download
 (with-temp-file "~/aaa.jpeg"
   (insert (pdd "https://httpbin.org/image/jpeg")))
+
+;; Arguments of :done are smart, it can be zero, one, two, three or four
+;; If zero argument, current buffer is the one with raw responsed string
+(pdd "https://httpbin.org/ip" :done (lambda () (message "%s" (buffer-string))))
+(pdd "https://httpbin.org/ip" :done (lambda (body) (message "IP: %s" (cdar body))))
+(pdd "https://httpbin.org/ip" :done (lambda (_body headers) (print headers)))
+(pdd "https://httpbin.org/ip" :done (lambda (_ _ status-code) (print status-code)))
+(pdd "https://httpbin.org/ip" :done (lambda (_ _ _ http-version) (print http-version)))
+
+;; Arguments of :filter and :fail are dynamical too
+(pdd "https://httpbin.org/ip" :fail (lambda () (message "pity.")))
+(pdd "https://httpbin.org/ip" :fail (lambda (err-msg) (message "%s" err-msg)))
+(pdd "https://httpbin.org/ip" :fail (lambda (_ http-code) (message "%s" http-code)))
+(pdd "https://httpbin.org/ip" :filter (lambda () (get-buffer-process (current-buffer))))
+(pdd "https://httpbin.org/ip" :filter (lambda (headers) (message "%s" headers)))
 ```
 
 Of course, there are tricks that can make things easier:

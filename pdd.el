@@ -1,4 +1,4 @@
-;;; pdd.el --- HTTP Library Adapter, support url, plz and more -*- lexical-binding: t -*-
+;;; pdd.el --- HTTP Library -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2025 lorniu <lorniu@gmail.com>
 
@@ -60,9 +60,10 @@
   "Default retry times when request timeout."
   :type 'integer)
 
-(defcustom pdd-multipart-boundary "pdd-boundary-=-=+O0o0O69Oo"
-  "A string used as multipart boundary."
-  :type 'string)
+(defconst pdd-multipart-boundary "pdd-boundary-=-=+O0o0O69Oo"
+  "A string used as multipart boundary.")
+
+(defvar url-http-codes)
 
 (defun pdd-log (tag fmt &rest args)
   "Output log to *Messages* buffer.
@@ -108,6 +109,7 @@ FMT and ARGS are arguments same as function `message'."
              if filep do (let ((fn (url-encode-url (url-file-nondirectory value))))
                            (insert "Content-Disposition: form-data; name=\"" key "\" filename=\"" fn "\"" newline)
                            (insert "Content-Type: " contentype newline newline)
+                           ;; It's not efficient to do this in emacs, but it does work
                            (insert-file-contents-literally value)
                            (goto-char (point-max)))
              else do (insert "Content-Disposition: form-data; name=\"" key "\"" newline newline value)
@@ -123,6 +125,7 @@ FMT and ARGS are arguments same as function `message'."
     (www-url     . ("Content-Type"  . "application/x-www-form-urlencoded"))
     (www-url-u8  . ("Content-Type"  . "application/x-www-form-urlencoded; charset=utf-8"))
     (acc-github  . ("Accept"        . "application/vnd.github+json"))
+    (basic       . ("Authorization" . "Basic %s"))
     (bear        . ("Authorization" . "Bearer %s"))
     (auth        . ("Authorization" . "%s %s")))
   "Some abbrevs can be used in alist of headers for short.
@@ -153,7 +156,9 @@ They are be replaced when transforming request.")
            collect (funcall stringfy item)))
     (setq data
           (when data
-            (if (atom data) (format "%s" data)
+            (if (atom data)
+                ;; Never modify the Content-Type when data is atom/string
+                (format "%s" data)
               (let ((ct (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)))
                 (cond ((string-match-p "/json" (or ct ""))
                        (setq binaryp t)
@@ -163,7 +168,10 @@ They are be replaced when transforming request.")
                        (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
                              (concat "multipart/form-data; boundary=" pdd-multipart-boundary))
                        (pdd-format-formdata data))
-                      (t (pdd-format-params data)))))))
+                      (t
+                       (unless ct (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
+                                        "application/x-www-form-urlencoded"))
+                       (pdd-format-params data)))))))
     (list data headers binaryp)))
 
 (defun pdd-transform-response (data meta)
@@ -185,6 +193,10 @@ META maybe a function or the response headers."
     (cl-loop for el in (mail-header-extract)
              collect (cons (car el) (string-trim (cdr el))))))
 
+(defun pdd-http-code-text (http-status-code)
+  "Get the text description of the HTTP-STATUS-CODE."
+  (caddr (assoc http-status-code url-http-codes)))
+
 (defun pdd-funcall (fn args)
   "Funcall FN and pass some of ARGS to it according its arity."
   (declare (indent 1))
@@ -194,17 +206,19 @@ META maybe a function or the response headers."
 
 ;;; Core
 
+(defvar pdd-base-url nil)
+
 (defvar pdd-default-sync nil
   "The sync style when no :sync specified explicitly for function `pdd'.
 It's value should be :sync or :async.")
-
-(defvar-local pdd-abort-flag nil
-  "Non-nil means to ignore following request progress.")
 
 (defvar pdd-default-error-handler nil
   "The default error handler which is a function with current error as argument.
 When error occurrs and no :fail specified, this will perform as the handler.
 Besides globally set, it also can be dynamically binding in let.")
+
+(defvar-local pdd-abort-flag nil
+  "Non-nil means to ignore following request progress.")
 
 (defclass pdd-client ()
   ((insts :allocation :class :initform nil)
@@ -269,33 +283,47 @@ If request async, return the process behind the request."
                             (if (eq pdd-default-sync :sync) t nil)
                           (if done nil t))))
            (setq args `(:sync ,sync ,@args))
-           (if (null method) (setq args `(:method ,(if data 'post 'get) ,@args)))
-           (setq origin-url url url (pdd-gen-url-with-params origin-url params))
+           (when (null method)
+             (setq args `(:method ,(if data 'post 'get) ,@args)))
+           (when (and pdd-base-url (string-prefix-p "/" url))
+             (setq url (concat pdd-base-url url)))
+           (setq origin-url url
+                 url (pdd-gen-url-with-params origin-url params))
            (let* ((tag (eieio-object-class client))
                   (origin-buffer (current-buffer))
                   (fail (or fail pdd-default-error-handler))
                   (failfn
-                   (lambda (status)
+                   ;; err should be unified as a list as (type data) like in error object
+                   ;; when is http error, data should be (status-code . description) format
+                   ;; the only arg err will be consumed by user's :fail with dynamical number arguments
+                   (lambda (err)
+                     (if pdd-debug (pdd-log tag "error object: %S" err))
                      ;; retry for timeout
                      (unless retry (setq retry pdd-max-retry))
-                     (if (and (cl-plusp retry) (string-match-p "timeout\\|504" (format "%s" status)))
+                     (if (and (cl-plusp retry) (string-match-p "timeout\\|408" (format "%s" err)))
                          (progn
                            (let ((inhibit-message t))
                              (message "Timeout, retrying (%d)..." retry))
                            (if pdd-debug (pdd-log tag "Request timeout, retrying (remains %d times)..." retry))
                            (apply #'pdd client origin-url `(:retry ,(1- retry) ,@args)))
                        ;; fail at last
-                       (if pdd-debug (pdd-log tag "REQUEST FAILED: (%s) %s" url status))
+                       (if pdd-debug (pdd-log tag "Handle fail..."))
                        (unwind-protect
                            (with-current-buffer (current-buffer)
-                             (condition-case err
-                                 (progn
-                                   (when (string-match-p "error" (format "%s" (car status)))
-                                     (pop status))
-                                   (setq status (list (error-message-string (cons 'user-error status))))
-                                   (if fail (pdd-funcall fail status) (signal 'user-error status)))
-                               (error
-                                (message "%s%s" (if pdd-abort-flag (format "[%s] " pdd-abort-flag) "") (error-message-string err)))))
+                             (cl-flet ((show-error (obj)
+                                         (when (eq (car err) 'error) ; avoid 'peculiar error'
+                                           (setf (car err) 'user-error))
+                                         (message
+                                          "%s%s"
+                                          (if pdd-abort-flag (format "[%s] " pdd-abort-flag) "")
+                                          (if (get (car obj) 'error-conditions)
+                                              (error-message-string obj)
+                                            (mapconcat (lambda (e) (format "%s" e)) obj ", ")))))
+                               (condition-case err1
+                                   (if fail ; ensure no error in this phase
+                                       (pdd-funcall fail (list (cadr err) (car-safe (cddr err))))
+                                     (show-error err))
+                                 (error (show-error err1)))))
                          ;; finally
                          (ignore-errors (funcall fine))))))
                   (dargs
@@ -311,20 +339,20 @@ If request async, return the process behind the request."
                      `(lambda ,dargs
                         (if pdd-debug (pdd-log ,tag "Done!"))
                         (unwind-protect
-                            (condition-case err
+                            (condition-case err1
                                 (with-current-buffer
                                     (if (and (buffer-live-p ,origin-buffer) (cl-plusp ,(length dargs)))
                                         ,origin-buffer
                                       (current-buffer))
                                   (,(or done 'identity) ,@dargs))
                               (error (setq pdd-abort-flag 'done)
-                                     (funcall ,failfn err)))
+                                     (funcall ,failfn err1)))
                           (ignore-errors (funcall ,fine))))))
                   (filterfn
                    (when filter
                      (lambda ()
                        ;; abort action and error case
-                       (condition-case err
+                       (condition-case err1
                            (unless pdd-abort-flag
                              (if (zerop (length (help-function-arglist filter)))
                                  ;; with no argument
@@ -337,9 +365,9 @@ If request async, return the process behind the request."
                                            (pdd-extract-http-headers)))
                                        (get-buffer-process (current-buffer))))))
                          (error
-                          (if pdd-debug (pdd-log tag "Error in filter: (%s) %s" url err))
+                          (if pdd-debug (pdd-log tag "Error in filter: (%s) %s" url err1))
                           (setq pdd-abort-flag 'filter)
-                          (funcall failfn err)))))))
+                          (funcall failfn err1)))))))
              (apply #'cl-call-next-method client url `(:fail ,failfn :filter ,filterfn :done ,donefn ,@args))))
   (declare (indent 1)))
 
@@ -359,7 +387,6 @@ If request async, return the process behind the request."
 (defvar url-http-transfer-encoding)
 (defvar url-http-response-status)
 (defvar url-http-response-version)
-(defvar url-http-codes)
 
 (defvar pdd-url-extra-filter nil)
 
@@ -380,7 +407,6 @@ See the generic method for args URL, METHOD, PARAMS, HEADERS, DATA, RESP,
 FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
   (ignore params fine retry)
   (let* ((tag (eieio-object-class client))
-         (url-user-agent (or (oref client user-agent) pdd-user-agent))
          (url-proxy-services (or (oref client proxy-services) url-proxy-services))
          (rdata (pdd-transform-request data headers))
          (url-request-data (car rdata))
@@ -396,8 +422,8 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
               (let ((bs (buffer-substring-no-properties
                          (min (1+ url-http-end-of-headers) (point-max)) (point-max)))
                     (hs (pdd-extract-http-headers)))
-                (list (pdd-transform-response bs (or resp hs))
-                      hs url-http-response-status url-http-response-version)))))
+                (list (pdd-transform-response bs (or resp hs)) hs
+                      url-http-response-status url-http-response-version)))))
          data data-buffer timer)
     (when pdd-debug
       (pdd-log tag "%s %s" url-request-method url)
@@ -406,22 +432,20 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
       (pdd-log tag "Proxy: %s" url-proxy-services)
       (pdd-log tag "User Agent: %s" url-user-agent)
       (pdd-log tag "MIME Encoding: %s" url-mime-encoding-string))
-    (let* ((errorh
+    (let* ((geterr
             (lambda (status)
               (cond
                ((null status)
                 (setq pdd-abort-flag 'conn)
-                (list 'bad-request "Maybe something wrong with network"))
+                `(http "Maybe something wrong with network" 400))
                ((or (null url-http-end-of-headers) (= 1 (point-max)))
                 (setq pdd-abort-flag 'conn)
-                (list 'empty-response "Nothing responsed from server"))
-               (t
+                `(http "Response unusual empty content" 417))
+               ((plist-get status :error)
                 (setq pdd-abort-flag 'resp)
                 (let* ((err (plist-get status :error))
-                       (code (caddr status))
-                       (desc (caddr (assoc code url-http-codes))))
-                  (if desc (setf (cadr err) desc))
-                  err)))))
+                       (code (caddr err)))
+                  `(,(car err) ,(pdd-http-code-text code) ,code))))))
            (callback
             (lambda (status)
               (ignore-errors (cancel-timer timer))
@@ -429,12 +453,16 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
               (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
               (unless pdd-abort-flag
                 (unwind-protect
-                    (if-let* ((err (funcall errorh status)))
+                    (if-let* ((err (funcall geterr status)))
                         (funcall fail err)
                       (setq data (pdd-funcall done (funcall get-resp-content))))
                   (unless sync (kill-buffer data-buffer))))))
            (proc-buffer (url-retrieve url callback nil t))
            (process (get-buffer-process proc-buffer)))
+      ;; Weird, but you have to bind `url-user-agent' like this to make it work
+      (setf (buffer-local-value 'url-user-agent proc-buffer)
+            (unless (assoc "User-Agent" (cadr rdata) #'string-equal-ignore-case)
+              (oref client user-agent) pdd-user-agent))
       ;; :filter support via hook
       (when (and filter (buffer-live-p proc-buffer))
         (with-current-buffer proc-buffer
@@ -450,8 +478,8 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
                    (ignore-errors
                      (with-current-buffer proc-buffer
                        (erase-buffer)
-                       (setq-local url-http-end-of-headers 52)
-                       (insert "HTTP/1.1 504 Operation timeout\nContent-Length: 17\n\nOperation timeout")))
+                       (setq-local url-http-end-of-headers 30)
+                       (insert "HTTP/1.1 408 Operation timeout")))
                    (ignore-errors
                      (delete-process process))))))
           (setq timer (run-with-timer timeout nil timer-callback))))
@@ -550,7 +578,7 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
                           (list "Unable to parse HTTP response status line"
                                 (buffer-substring (point) (line-end-position)))))
                 ;; have to extract headers for body decode, waste but works
-                (let* ((http-version (string-to-number (match-string 1)))
+                (let* ((http-version (match-string 1)) ; the version in url.el is a string
                        (status-code (string-to-number (match-string 2)))
                        (headers (pdd-extract-http-headers))
                        (content-type (alist-get 'content-type headers))
@@ -567,20 +595,23 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
                         headers status-code http-version))))))
          (raise-error
           (lambda (err)
-            ;; hacky, but try to unify the error styles with url.el
+            ;; hacky, but try to unify the error data format with url.el
             (when (and (consp err) (memq (car err) '(plz-http-error plz-curl-error)))
               (setq err (caddr err)))
             (when (plz-error-p err)
               (setq err
-                    (or (plz-error-message err)
-                        (when-let* ((curl (plz-error-curl-error err)))
-                          (list 'curl-error
+                    (if-let* ((msg (plz-error-message err)))
+                        (list 'plz-error msg)
+                      (if-let* ((curl (plz-error-curl-error err)))
+                          (list 'plz-error
                                 (concat (format "%s" (or (cdr curl) (car curl)))
                                         (pcase (car curl)
                                           (2 (when (memq system-type '(cygwin windows-nt ms-dos))
-                                               pdd-plz-initialize-error-message))))))
-                        (when-let* ((res (plz-error-response err)))
-                          (list 'http (plz-response-status res) (plz-response-body res))))))
+                                               pdd-plz-initialize-error-message)))))
+                        (if-let* ((res (plz-error-response err))
+                                  (code (plz-response-status res)))
+                            (list 'error (pdd-http-code-text code) code)
+                          err)))))
             ;; :fail has been decorated, it's non-nil and have a required argument
             (funcall fail err))))
     ;; data and headers
@@ -650,7 +681,7 @@ one argument (url) or two arguments (url method)")))
          (fst (cl-subseq args 0 pos))
          (lst (cl-subseq args pos))
          (take (lambda (fn) (if-let* ((p (cl-position-if fn fst))) (pop (nthcdr p fst)))))
-         (url (funcall take (lambda (arg) (and (stringp arg) (string-prefix-p "http" arg)))))
+         (url (funcall take (lambda (arg) (and (stringp arg) (string-match-p "^\\(http\\|/\\)" arg)))))
          (method (funcall take (lambda (arg) (memq arg '(get post put patch delete head options trace connect)))))
          (done (funcall take #'functionp))
          (params-or-data (car-safe fst))
