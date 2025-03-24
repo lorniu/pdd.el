@@ -516,40 +516,55 @@ See the generic method for args URL, METHOD, PARAMS HEADERS, DATA, RESP,
 FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
   (ignore params fine retry)
   (let* ((tag (eieio-object-class client))
-         (fail (or fail pdd-default-error-handler))
          (rdata (pdd-transform-request data headers))
+         (abort-flag) ; used to catch abort action from :filter
          (plz-curl-default-args (if (slot-boundp client 'extra-args)
                                     (append (oref client extra-args) plz-curl-default-args)
                                   plz-curl-default-args))
+         (filter-fn
+          (when filter
+            (lambda (proc string)
+              (with-current-buffer (process-buffer proc)
+                (save-excursion
+                  (goto-char (point-max))
+                  (save-excursion (insert string))
+                  (when (re-search-forward plz-http-end-of-headers-regexp nil t)
+                    (save-restriction
+                      ;; it's better to provide a narrowed buffer to :filter
+                      (narrow-to-region (point) (point-max))
+                      (unwind-protect
+                          (funcall filter)
+                        (setq abort-flag pdd-abort-flag)))))))))
          (string-or-binary
           (lambda () ; decode according content-type. there is no builtin way to do this in plz
-            (widen)
-            (goto-char (point-min))
-            ;; Clean the ^M, make it same as in url.el
-            (save-excursion
-              (while (search-forward "\r" nil :noerror) (replace-match "")))
-            ;; don't wasting time on decode/extract when :done without args
-            (unless (and done (= (car (func-arity done)) 0))
-              (unless (looking-at plz-http-response-status-line-regexp)
-                (signal 'plz-http-error
-                        (list "Unable to parse HTTP response status line"
-                              (buffer-substring (point) (line-end-position)))))
-              ;; have to extract headers for body decode, waste but works
-              (let* ((http-version (string-to-number (match-string 1)))
-                     (status-code (string-to-number (match-string 2)))
-                     (headers (pdd-extract-http-headers))
-                     (content-type (alist-get 'content-type headers))
-                     (binaryp (pdd-binary-type-p content-type)))
-                (set-buffer-multibyte (not binaryp))
-                (goto-char (point-min))
-                (unless (re-search-forward plz-http-end-of-headers-regexp nil t)
-                  (signal 'plz-http-error '("Unable to find end of headers")))
-                (narrow-to-region (point) (point-max))
-                ;; hard code 'utf-8. any scences that not it?
-                (unless binaryp (decode-coding-region (point-min) (point-max) 'utf-8))
-                ;; pass all these data to done. pity elisp has no values mechanism
-                (list (pdd-transform-response (buffer-string) (or resp headers))
-                      headers status-code http-version)))))
+            (unless pdd-abort-flag
+              (widen)
+              (goto-char (point-min))
+              ;; Clean the ^M, make it same as in url.el
+              (save-excursion
+                (while (search-forward "\r" nil :noerror) (replace-match "")))
+              ;; don't wasting time on decode/extract when :done without args
+              (unless (zerop (car (func-arity done)))
+                (unless (looking-at plz-http-response-status-line-regexp)
+                  (signal 'plz-http-error
+                          (list "Unable to parse HTTP response status line"
+                                (buffer-substring (point) (line-end-position)))))
+                ;; have to extract headers for body decode, waste but works
+                (let* ((http-version (string-to-number (match-string 1)))
+                       (status-code (string-to-number (match-string 2)))
+                       (headers (pdd-extract-http-headers))
+                       (content-type (alist-get 'content-type headers))
+                       (binaryp (pdd-binary-type-p content-type)))
+                  (set-buffer-multibyte (not binaryp))
+                  (goto-char (point-min))
+                  (unless (re-search-forward plz-http-end-of-headers-regexp nil t)
+                    (signal 'plz-http-error '("Unable to find end of headers")))
+                  (narrow-to-region (point) (point-max))
+                  ;; hard code 'utf-8. any scences that not it?
+                  (unless binaryp (decode-coding-region (point-min) (point-max) 'utf-8))
+                  ;; pass all these data to done. pity elisp has no values mechanism
+                  (list (pdd-transform-response (buffer-string) (or resp headers))
+                        headers status-code http-version))))))
          (raise-error
           (lambda (err)
             ;; hacky, but try to unify the error styles with url.el
@@ -566,8 +581,8 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
                                                pdd-plz-initialize-error-message))))))
                         (when-let* ((res (plz-error-response err)))
                           (list 'http (plz-response-status res) (plz-response-body res))))))
-            (if fail (funcall fail err)
-              (signal 'user-error (cdr err))))))
+            ;; :fail has been decorated, it's non-nil and have a required argument
+            (funcall fail err))))
     ;; data and headers
     (setq data (car rdata) headers (cadr rdata))
     (unless (alist-get "User-Agent" headers nil nil #'string-equal-ignore-case)
@@ -581,15 +596,16 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
     ;; sync
     (if sync
         (condition-case err
-            (let ((r (plz method url
-                       :headers headers
-                       :body data
-                       :body-type (if (caddr rdata) 'binary 'text)
-                       :decode nil
-                       :as string-or-binary
-                       :then 'sync
-                       :timeout timeout)))
-              (if done (pdd-funcall done r) (car r)))
+            (let ((res (plz method url
+                         :headers headers
+                         :body data
+                         :body-type (if (caddr rdata) 'binary 'text)
+                         :decode nil
+                         :as string-or-binary
+                         :filter filter-fn
+                         :then 'sync
+                         :timeout timeout)))
+              (unless abort-flag (pdd-funcall done res)))
           (error (funcall raise-error err)))
       ;; async
       (plz method url
@@ -598,19 +614,8 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
         :body-type (if (caddr rdata) 'binary 'text)
         :decode nil
         :as string-or-binary
-        :filter (when filter
-                  (lambda (proc string)
-                    (with-current-buffer (process-buffer proc)
-                      (save-excursion
-                        (goto-char (point-max))
-                        (insert string)
-                        (goto-char (point-min))
-                        (when (re-search-forward plz-http-end-of-headers-regexp nil t)
-                          (save-restriction
-                            ;; it's better to provide a narrowed buffer to :filter
-                            (narrow-to-region (point) (point-max))
-                            (funcall filter)))))))
-        :then (lambda (res) (if done (pdd-funcall done res)))
+        :filter filter-fn
+        :then (lambda (res) (unless pdd-abort-flag (pdd-funcall done res)))
         :else (lambda (err) (funcall raise-error err))
         :timeout timeout))))
 
