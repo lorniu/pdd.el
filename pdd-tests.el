@@ -31,56 +31,57 @@
 (require 'pdd)
 (require 'plz)
 
-(defconst pdd-test-clients '(url plz))
+(defconst pdd-test-backends '(url plz))
 
 (defvar pdd-test-host "https://httpbin.org")
 
-;;(setq pdd-base-url pdd-test-host)
+;;(setq pdd-debug nil)
 ;;(setq pdd-default-sync :sync)
 ;;(setq pdd-default-sync :async)
-;;(setq pdd-default-client (pdd-url-client))
-;;(setq pdd-default-client (pdd-plz-client))
+;;(setq pdd-base-url pdd-test-host)
+;;(setq pdd-default-backend (pdd-url-backend))
+;;(setq pdd-default-backend (pdd-plz-backend))
 
 (defun pdd-block-and-wait-proc (proc)
   (cl-loop while (ignore-errors (buffer-live-p (process-buffer proc)))
            do (sleep-for 0.2)))
 
-(defmacro pdd-test-req (client &rest args)
+(defmacro pdd-test-req (backend &rest args)
   "Wrap `pdd' to ease tests."
   (declare (indent 1))
   `(let ((pdd-base-url ,pdd-test-host)
-         (pdd-default-client (,(intern (format "pdd-%s-client" client)))))
+         (pdd-default-backend (,(intern (format "pdd-%s-backend" backend)))))
      (pdd ,@args)))
 
 (cl-defmacro pdd-deftests (name (&rest forbidens) &rest body)
   "Build test functions, cover all the cases by composing url/plz and sync/aync."
   (declare (indent 2))
   (cl-labels
-      ((walk-inject (expr client sync)
+      ((walk-inject (expr backend sync)
          (cond
           ((and (consp expr) (eq (car expr) 'pdd))
-           `(let ((proc (pdd-test-req ,client ,@(cdr expr))))
+           `(let ((proc (pdd-test-req ,backend ,@(cdr expr))))
               ,(if (eq :async sync) `(pdd-block-and-wait-proc proc))))
           ((consp expr)
-           (cons (walk-inject (car expr) client sync)
-                 (walk-inject (cdr expr) client sync)))
+           (cons (walk-inject (car expr) backend sync)
+                 (walk-inject (cdr expr) backend sync)))
           (t expr)))
-       (deftest (client sync)
+       (deftest (backend sync)
          (let* ((sync (or sync :sync))
-                (fname (intern (format "pdd-test-%s--%s%s" name client sync))))
+                (fname (intern (format "pdd-test-<%s>-%s%s" name backend sync))))
            `(ert-deftest ,fname ()
-              ,(unless (or (memq client forbidens)
+              ,(unless (or (memq backend forbidens)
                            (memq sync forbidens)
-                           (memq (intern (format "%s%s" client sync)) forbidens))
+                           (memq (intern (format "%s%s" backend sync)) forbidens))
                  `(let ((pdd-default-sync ,sync))
                     ,@(mapcar (lambda (expr)
                                 (let ((sd (if (memq (car expr) '(let let*)) (caddr expr) expr)))
-                                  (setq sd (walk-inject sd client sync))
+                                  (setq sd (walk-inject sd backend sync))
                                   (setq sd `(should (let (it) ,(cadr sd) ,@(cddr sd))))
                                   (if (eq (car expr) 'should) sd
                                     `(,(car expr) ,(cadr expr) ,sd))))
                               body)))))))
-    `(progn ,@(cl-loop for c in pdd-test-clients
+    `(progn ,@(cl-loop for c in pdd-test-backends
                        collect (deftest c :sync)
                        collect (deftest c :async)))))
 
@@ -91,7 +92,7 @@
   (should (equal (pdd-detect-charset 'application/json) 'utf-8))
   (should (equal (pdd-detect-charset "application/json") 'utf-8))
   (should (equal (pdd-detect-charset "application/json;charset=gbk") 'gbk))
-  (should (equal (pdd-detect-charset "application/json;   charset=gbk") 'gbk)))
+  (should (equal (pdd-detect-charset "text/html; x=3,  charset=gbk") 'gbk)))
 
 
 ;;; Request Tests
@@ -186,7 +187,7 @@
               :done (lambda (r) (setq it r)))
             (and (>= chunks 1) (= (length it) 100)))))
 
-(pdd-deftests binary-data ()
+(pdd-deftests binary-data (plz)
   (should (pdd "/bytes/100" :done (lambda (raw) (setq it raw)))
           (= (length it) 100))
   (should (pdd "/stream-bytes/100" :done (lambda (raw) (setq it raw)))
@@ -240,7 +241,7 @@
 
 ;; Inhibit this test at present
 ;; FIXME: there is response parse bug in plz, patch is needed later?
-(pdd-deftests redirect (plz)
+(pdd-deftests redirect (plz url)
   (should (pdd "/redirect-to?url=/get" :done (lambda (r) (setq it r)))
           (string-suffix-p "/get" (alist-get 'url it)))
   (should (pdd "/redirect/1" :done (lambda (r) (setq it r)))
