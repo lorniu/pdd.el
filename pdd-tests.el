@@ -84,6 +84,16 @@
                        collect (deftest c :sync)
                        collect (deftest c :async)))))
 
+
+;;; Common Tests
+
+(ert-deftest pdd-test--detect-charset ()
+  (should (equal (pdd-detect-charset 'application/json) 'utf-8))
+  (should (equal (pdd-detect-charset "application/json") 'utf-8))
+  (should (equal (pdd-detect-charset "application/json;charset=gbk") 'gbk))
+  (should (equal (pdd-detect-charset "application/json;   charset=gbk") 'gbk)))
+
+
 ;;; Request Tests
 
 (ert-deftest pdd-test-basic-request ()

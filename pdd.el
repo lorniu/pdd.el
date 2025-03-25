@@ -39,7 +39,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'url)
+(require 'url-http)
 (require 'eieio)
 (require 'help)
 
@@ -71,13 +71,23 @@ TAG usually is the name of current http client.
 FMT and ARGS are arguments same as function `message'."
   (apply #'message (format "[%s] %s" (or tag "pdd") fmt) args))
 
+(defun pdd-detect-charset (content-type)
+  "Detect charset from CONTENT-TYPE header."
+  (when content-type
+    (if-let* ((param (cadr (split-string (format "%s" content-type) ";")))
+              (pair (split-string param "=" t))
+              (charset (cadr pair)))
+        (intern (downcase charset))
+      'utf-8)))
+
 (defun pdd-binary-type-p (content-type)
   "Check if current CONTENT-TYPE is binary."
   (when content-type
-    (cl-destructuring-bind (mime sub) (string-split content-type "/" nil "[ \n\r\t]")
+    (cl-destructuring-bind (mime sub)
+        (string-split content-type "/" nil "[ \n\r\t]")
       (not (or (equal mime "text")
                (and (equal mime "application")
-                    (string-match-p "json\\|xml\\|php" sub)))))))
+                    (string-match-p "json\\|xml\\|php\\|x-www-form-urlencoded" sub)))))))
 
 (defun pdd-format-params (alist)
   "Format ALIST to k=v style query string."
@@ -106,10 +116,10 @@ FMT and ARGS are arguments same as function `message'."
                   (setq value (format "%s" value)))
              for newline = "\r\n"
              do (insert "--" pdd-multipart-boundary newline)
+             ;; It's not efficient to do this in emacs, but it does work
              if filep do (let ((fn (url-encode-url (url-file-nondirectory value))))
                            (insert "Content-Disposition: form-data; name=\"" key "\" filename=\"" fn "\"" newline)
                            (insert "Content-Type: " contentype newline newline)
-                           ;; It's not efficient to do this in emacs, but it does work
                            (insert-file-contents-literally value)
                            (goto-char (point-max)))
              else do (insert "Content-Disposition: form-data; name=\"" key "\"" newline newline value)
@@ -129,6 +139,15 @@ FMT and ARGS are arguments same as function `message'."
     (bear        . ("Authorization" . "Bearer %s"))
     (auth        . ("Authorization" . "%s %s")))
   "Some abbrevs can be used in alist of headers for short.
+With the format string style placeholder it can be used to pass args after it.
+
+Such as:
+
+   `(json ua-emacs
+     (bear \"hello\")
+     (auth \"Bearer\" \"hello\")
+     (\"Authorization\" . \"Bearer hello\"))
+
 They are be replaced when transforming request.")
 
 (defun pdd-transform-request (data headers)
@@ -174,16 +193,19 @@ They are be replaced when transforming request.")
                        (pdd-format-params data)))))))
     (list data headers binaryp)))
 
-(defun pdd-transform-response (data meta)
-  "Transform responsed DATA according META.
-META maybe a function or the response headers."
+(defun pdd-transform-response (data headers &optional transformer)
+  "Transform responsed DATA according HEADERS and TRANSFORMER."
   (if pdd-debug (pdd-log nil "transform response..."))
-  (if (functionp meta)
-      (funcall meta data)
-    (let ((ct (alist-get 'content-type meta)))
-      (cond ((string-match-p "application/json" ct)
-             (json-read-from-string (decode-coding-string data 'utf-8)))
-            (t data)))))
+  (let* ((content-type (alist-get 'content-type headers))
+         (binaryp (pdd-binary-type-p content-type))
+         (charset (unless binaryp (pdd-detect-charset content-type)))
+         (data (if charset (decode-coding-string data charset) data)))
+    (if (functionp transformer)
+        (funcall transformer data)
+      (cond
+       ((string-match-p "application/json" content-type)
+        (json-read-from-string data))
+       (t data)))))
 
 (defun pdd-extract-http-headers ()
   "Extract http headers from the current responsed buffer."
@@ -197,6 +219,20 @@ META maybe a function or the response headers."
   "Get the text description of the HTTP-STATUS-CODE."
   (caddr (assoc http-status-code url-http-codes)))
 
+(cl-defmacro with-pdd-proc-buffer ((headers &optional content-type binaryp charset) &rest body)
+  "Common processing helper for response buffer.
+HEADERS, CONTENT-TYPE, CHARSET and BINARYP are pre-evalated for using in BODY."
+  (declare (indent 1))
+  (let ((lets `((,headers (pdd-extract-http-headers)))))
+    (when (or content-type charset binaryp)
+      (if (eq content-type '_) (setq content-type 'content-type))
+      (push `(,content-type (alist-get 'content-type ,headers)) lets))
+    (when binaryp
+      (push `(,binaryp (pdd-binary-type-p ,content-type)) lets))
+    (when (and charset (not (string-prefix-p "_" (format "%s" charset))))
+      (push `(,charset (unless ,binaryp (pdd-detect-charset ,content-type))) lets))
+    `(let* ,(reverse lets) ,@body)))
+
 (defun pdd-funcall (fn args)
   "Funcall FN and pass some of ARGS to it according its arity."
   (declare (indent 1))
@@ -206,14 +242,16 @@ META maybe a function or the response headers."
 
 ;;; Core
 
-(defvar pdd-base-url nil)
+(defvar pdd-base-url nil
+  "Concat with url when the url is not started with http.
+Use as dynamical binding usually." )
 
 (defvar pdd-default-sync nil
   "The sync style when no :sync specified explicitly for function `pdd'.
-It's value should be :sync or :async.")
+It's value should be :sync or :async.  Default nil means not specified.")
 
 (defvar pdd-default-error-handler nil
-  "The default error handler which is a function with current error as argument.
+  "The default error handler which is a function same as callback of :fail.
 When error occurrs and no :fail specified, this will perform as the handler.
 Besides globally set, it also can be dynamically binding in let.")
 
@@ -415,15 +453,16 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
          (url-mime-encoding-string "identity")
          (get-resp-content
           (lambda ()
-            ;; after around, the :done is always exist
+            ;; don't wasting time on decode/extract when :done has no args
             (unless (zerop (car (func-arity done)))
-              ;; set multibyte here, just to unify with plz.el
-              (set-buffer-multibyte (not (pdd-binary-type-p url-http-content-type)))
-              (let ((bs (buffer-substring-no-properties
-                         (min (1+ url-http-end-of-headers) (point-max)) (point-max)))
-                    (hs (pdd-extract-http-headers)))
-                (list (pdd-transform-response bs (or resp hs)) hs
-                      url-http-response-status url-http-response-version)))))
+              (with-pdd-proc-buffer (headers _ binaryp)
+                (set-buffer-multibyte (not binaryp))
+                (goto-char url-http-end-of-headers)
+                ;; pass all these data to done. pity elisp has no values mechanism
+                (list (pdd-transform-response
+                       (buffer-substring-no-properties (point) (point-max))
+                       headers resp)
+                      headers url-http-response-status url-http-response-version)))))
          data data-buffer timer)
     (when pdd-debug
       (pdd-log tag "%s %s" url-request-method url)
@@ -454,7 +493,7 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
               (unless pdd-abort-flag
                 (unwind-protect
                     (if-let* ((err (funcall geterr status)))
-                        (funcall fail err)
+                        (funcall fail err) ; :fail has been decorated, it's non-nil and has a required argument
                       (setq data (pdd-funcall done (funcall get-resp-content))))
                   (unless sync (kill-buffer data-buffer))))))
            (proc-buffer (url-retrieve url callback nil t))
@@ -564,35 +603,22 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
                           (funcall filter)
                         (setq abort-flag pdd-abort-flag)))))))))
          (string-or-binary
-          (lambda () ; decode according content-type. there is no builtin way to do this in plz
+          (lambda ()
             (unless pdd-abort-flag
               (widen)
               (goto-char (point-min))
-              ;; Clean the ^M, make it same as in url.el
-              (save-excursion
+              (save-excursion ; Clean the ^M, make it same as in url.el
                 (while (search-forward "\r" nil :noerror) (replace-match "")))
-              ;; don't wasting time on decode/extract when :done without args
               (unless (zerop (car (func-arity done)))
-                (unless (looking-at plz-http-response-status-line-regexp)
-                  (signal 'plz-http-error
-                          (list "Unable to parse HTTP response status line"
-                                (buffer-substring (point) (line-end-position)))))
-                ;; have to extract headers for body decode, waste but works
-                (let* ((http-version (match-string 1)) ; the version in url.el is a string
-                       (status-code (string-to-number (match-string 2)))
-                       (headers (pdd-extract-http-headers))
-                       (content-type (alist-get 'content-type headers))
-                       (binaryp (pdd-binary-type-p content-type)))
+                (with-pdd-proc-buffer (headers content-type binaryp)
                   (set-buffer-multibyte (not binaryp))
-                  (goto-char (point-min))
+                  (let ((url-http-end-of-headers t)) (url-http-parse-response))
                   (unless (re-search-forward plz-http-end-of-headers-regexp nil t)
                     (signal 'plz-http-error '("Unable to find end of headers")))
-                  (narrow-to-region (point) (point-max))
-                  ;; hard code 'utf-8. any scences that not it?
-                  (unless binaryp (decode-coding-region (point-min) (point-max) 'utf-8))
-                  ;; pass all these data to done. pity elisp has no values mechanism
-                  (list (pdd-transform-response (buffer-string) (or resp headers))
-                        headers status-code http-version))))))
+                  (list (pdd-transform-response
+                         (buffer-substring-no-properties (point) (point-max))
+                         headers resp)
+                        headers url-http-response-status url-http-response-version))))))
          (raise-error
           (lambda (err)
             ;; hacky, but try to unify the error data format with url.el
@@ -612,7 +638,6 @@ FILTER, DONE, FAIL, FINE, TIMEOUT, SYNC and RETRY and more."
                                   (code (plz-response-status res)))
                             (list 'error (pdd-http-code-text code) code)
                           err)))))
-            ;; :fail has been decorated, it's non-nil and have a required argument
             (funcall fail err))))
     ;; data and headers
     (setq data (car rdata) headers (cadr rdata))
