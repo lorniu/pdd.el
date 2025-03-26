@@ -104,11 +104,22 @@ They are be replaced when transforming request.")
 
 (defvar url-http-codes)
 
-(defun pdd-log (tag fmt &rest args)
-  "Output log to *Messages* buffer.
-TAG usually is the name of current http backend.
-FMT and ARGS are arguments same as function `message'."
-  (apply #'message (format "[%s] %s" (or tag "pdd") fmt) args))
+(defun pdd-log (tag &rest args)
+  "Output log to *Messages* buffer using syntax of `message'.
+TAG usually is the name of current http backend.  ARGS should be fmt and
+rest arguments."
+  (declare (indent 1))
+  (when pdd-debug
+    (cl-loop with sub = nil
+             with fmt = (format "[%s] " (or tag "pdd"))
+             with msg = (lambda (args)
+                          (setq args (nreverse args))
+                          (apply #'message (concat fmt (car args)) (cdr args)))
+             for el in args
+             if (and (stringp el) (cl-find ?% el))
+             do (progn (if sub (funcall msg sub)) (setq sub (list el)))
+             else do (push el sub)
+             finally (funcall msg sub))))
 
 (defun pdd-detect-charset (content-type)
   "Detect charset from CONTENT-TYPE header."
@@ -170,21 +181,6 @@ Handles both regular fields and file uploads with proper boundary formatting."
              else do (insert newline "--" pdd-multipart-boundary "--"))
     (buffer-substring-no-properties (point-min) (point-max))))
 
-(defun pdd-transform-result (data headers &optional transformer)
-  "Transform response DATA according to HEADERS and TRANSFORMER."
-  (if pdd-debug (pdd-log nil "transform response..."))
-  (let* ((content-type (alist-get 'content-type headers))
-         (binaryp (pdd-binary-type-p content-type)))
-    (setq data (if binaryp
-                   (encode-coding-string data 'binary)
-                 (decode-coding-string data (pdd-detect-charset content-type))))
-    (if (functionp transformer)
-        (pdd-funcall transformer (list data headers))
-      (cond
-       ((string-match-p "application/json" content-type)
-        (json-read-from-string data))
-       (t data)))))
-
 (defun pdd-extract-http-headers ()
   "Extract http headers from the current response buffer."
   (save-excursion
@@ -231,6 +227,43 @@ Besides globally set, it also can be dynamically binding in let.")
 (defvar-local pdd-abort-flag nil
   "Non-nil means to ignore following request progress.")
 
+(defvar pdd-request-transformers
+  '(pdd-transform-req-done
+    pdd-transform-req-filter
+    pdd-transform-req-fail
+    pdd-transform-req-headers
+    pdd-transform-req-data
+    pdd-transform-req-finally)
+  "List of functions that transform the request object in sequence.
+
+Each transformer is a function that takes the current request object as its
+single argument.  Transformers are applied in the order they appear in this
+list, with each transformer able to modify the request object before passing
+it to the next.
+
+This list contains built-in transformers that provide essential functionality.
+While you may append additional transformers to customize behavior, you should
+not remove or reorder the built-in transformers unless you fully understand the
+consequences.")
+
+(defvar pdd-response-transformers
+  '(pdd-transform-resp-init
+    pdd-transform-resp-headers
+    pdd-transform-resp-decode
+    pdd-transform-resp-body)
+  "List of functions that process and transform the response buffer sequentially.
+
+Each transformer is a function that operates on the current response buffer.
+Transformers are applied in the order they appear in this list, with each
+transformer able to modify the buffer state before passing it to the next.
+
+This list contains core transformers that handle essential response processing
+stages.  While you may safely append additional transformers to extend
+functionality, you should not remove or reorder the built-in transformers unless
+you fully understand their interdependencies.")
+
+;; Backend
+
 (defclass pdd-backend ()
   ((insts :allocation :class :initform nil)
    (user-agent :initarg :user-agent :initform nil :type (or string null)))
@@ -246,12 +279,16 @@ Besides globally set, it also can be dynamically binding in let.")
     (let ((inst (cl-call-next-method)))
       (prog1 inst (oset-default class insts `((,key . ,inst) ,@insts))))))
 
+;; Request
+
 (defclass pdd-request ()
   ((url      :initarg :url      :type string)
    (method   :initarg :method   :type (or symbol string) :initform nil)
    (params   :initarg :params   :type (or string list)   :initform nil)
    (headers  :initarg :headers  :type list               :initform nil)
    (data     :initarg :data     :type (or function string list) :initform nil)
+   (datas    :initform nil      :type (or string null))
+   (binaryp  :initform nil      :type boolean)
    (resp     :initarg :resp     :type (or function null) :initform nil)
    (timeout  :initarg :timeout  :type (or number null)   :initform nil)
    (retry    :initarg :retry    :type (or number null)   :initform nil)
@@ -260,46 +297,11 @@ Besides globally set, it also can be dynamically binding in let.")
    (fail     :initarg :fail     :type (or function null) :initform nil)
    (fine     :initarg :fine     :type (or function null) :initform nil)
    (sync     :initarg :sync)
-   (binaryp  :initform nil :type boolean)
    (buffer   :initarg :buffer :initform nil)
    (backend   :initarg :backend))
   "Abstract base class for HTTP request configs.")
 
-(cl-defmethod pdd-build ((request pdd-request) (_ (eql 'fail)))
-  "Construct the :fail callback handler for REQUEST."
-  (with-slots (retry fail fine backend) request
-    (let ((fail fail) (tag (eieio-object-class backend)))
-      (lambda (err)
-        (if pdd-debug (pdd-log tag "error object: %S" err))
-        ;; retry
-        (if (and (cl-plusp retry) (funcall pdd-retry-condition err))
-            (progn
-              (let ((inhibit-message t))
-                (message "Retring for %s %d..." (cadr err) retry))
-              (if pdd-debug (pdd-log tag "Retrying for %s (remains %d times)..." err retry))
-              (cl-decf retry)
-              (funcall #'pdd backend request))
-          ;; really fail now
-          (if pdd-debug (pdd-log tag "Handle fail..."))
-          (unwind-protect
-              (cl-flet ((show-error (obj)
-                          (when (eq (car err) 'error) ; avoid 'peculiar error'
-                            (setf (car err) 'user-error))
-                          (message
-                           "%s%s"
-                           (if pdd-abort-flag (format "[%s] " pdd-abort-flag) "")
-                           (if (get (car obj) 'error-conditions)
-                               (error-message-string obj)
-                             (mapconcat (lambda (e) (format "%s" e)) obj ", ")))))
-                (condition-case err1
-                    (if fail ; ensure no error in this phase
-                        (pdd-funcall fail (cadr err) (car-safe (cddr err)) err request)
-                      (show-error err))
-                  (error (show-error err1))))
-            ;; finally
-            (ignore-errors (pdd-funcall fine request))))))))
-
-(cl-defmethod pdd-build ((request pdd-request) (_ (eql 'done)))
+(cl-defmethod pdd-transform-req-done ((request pdd-request))
   "Construct the :done callback handler for REQUEST."
   (with-slots (done fail fine buffer backend) request
     (let ((args (cl-loop for arg in
@@ -308,47 +310,92 @@ Besides globally set, it also can be dynamically binding in let.")
                            (help-function-arglist done))
                          until (memq arg '(&rest &optional &key))
                          collect arg)))
-      (if (> (length args) 5)
-          (user-error "Function :done has invalid arguments")
-        `(lambda ,args
-           (if pdd-debug (pdd-log ,(eieio-object-class backend) "Done!"))
-           (unwind-protect
-               (condition-case err1
-                   (with-current-buffer
-                       (if (and (buffer-live-p ,buffer) (cl-plusp ,(length args)))
-                           ,buffer
-                         (current-buffer))
-                     (,(or done 'identity) ,@args))
-                 (error (setq pdd-abort-flag 'done)
-                        (if pdd-debug (pdd-log 'pdd "error occurs in done phase.."))
-                        (funcall ,fail err1)))
-             (ignore-errors (pdd-funcall ,fine ,request))))))))
+      (setf done
+            `(lambda ,args
+               (pdd-log 'done "enter")
+               (unwind-protect
+                   (condition-case err1
+                       (with-current-buffer
+                           (if (and (buffer-live-p ,buffer) (cl-plusp ,(length args)))
+                               ,buffer
+                             (current-buffer))
+                         (prog1
+                             (,(or done 'identity) ,@args)
+                           (pdd-log 'done "finished.")))
+                     (error (setq pdd-abort-flag 'done)
+                            (pdd-log 'done "error. %s" err1)
+                            (funcall ,fail err1)))
+                 (ignore-errors (pdd-funcall ,fine (list ,request)))))))))
 
-(cl-defmethod pdd-build ((request pdd-request) (_ (eql 'filter)))
+(cl-defmethod pdd-transform-req-filter ((request pdd-request))
   "Construct the :filter callback handler for REQUEST."
-  (with-slots (filter fail backend) request
-    (let ((filter filter) (tag (eieio-object-class backend)))
-      (lambda ()
-        ;; abort action and error case
-        (condition-case err1
-            (unless pdd-abort-flag
-              (if (zerop (length (help-function-arglist filter)))
-                  ;; with no argument
-                  (funcall filter)
-                ;; arguments: (&optional headers process request)
-                (pdd-funcall filter
-                  (pdd-extract-http-headers)
-                  (get-buffer-process (current-buffer))
-                  request)))
-          (error
-           (if pdd-debug (pdd-log tag "Error in filter: %s" err1))
-           (setq pdd-abort-flag 'filter)
-           (funcall fail err1)))))))
+  (with-slots (filter fail) request
+    (when filter
+      (setf filter
+            (let ((filter1 filter))
+              (lambda ()
+                (if pdd-abort-flag
+                    (pdd-log 'filter "skip (aborted).")
+                  (pdd-log 'filter "enter")
+                  (condition-case err1
+                      (if (zerop (length (help-function-arglist filter1)))
+                          ;; with no argument
+                          (funcall filter1)
+                        ;; arguments: (&optional headers process request)
+                        (let* ((headers (pdd-extract-http-headers))
+                               (buffer (current-buffer))
+                               (process (get-buffer-process buffer)))
+                          (pdd-log 'filter "headers: %s" headers)
+                          (pdd-funcall filter1 (list headers process request))))
+                    (error
+                     (pdd-log 'filter "fail: %s" err1)
+                     (setq pdd-abort-flag 'filter)
+                     (funcall fail err1))))))))))
 
-(cl-defmethod pdd-transform-request ((request pdd-request))
-  "Transform data, headers and others in REQUEST."
-  (if pdd-debug (pdd-log nil "transform request..."))
-  (with-slots (data headers binaryp) request
+(cl-defmethod pdd-transform-req-fail ((request pdd-request))
+  "Construct the :fail callback handler for REQUEST."
+  (with-slots (retry fail fine backend) request
+    (setf fail
+          (let ((fail1 (or fail pdd-default-error-handler)))
+            (lambda (err)
+              (pdd-log 'fail "enter: %s | %s" err (or fail1 'None))
+              ;; retry
+              (if (and (cl-plusp retry) (funcall pdd-retry-condition err))
+                  (progn
+                    (if pdd-debug
+                        (pdd-log 'fail "retrying (remains %d times)..." retry)
+                      (let ((inhibit-message t))
+                        (message "(%d) retring for %s..." retry (cadr err))))
+                    (cl-decf retry)
+                    (funcall #'pdd backend request))
+                ;; really fail now
+                (pdd-log 'fail "really, it's fail...")
+                (unwind-protect
+                    (cl-flet ((show-error (obj)
+                                (when (eq (car err) 'error) ; avoid 'peculiar error'
+                                  (setf (car err) 'user-error))
+                                (message
+                                 "%s%s"
+                                 (if pdd-abort-flag (format "[%s] " pdd-abort-flag) "")
+                                 (if (get (car obj) 'error-conditions)
+                                     (error-message-string obj)
+                                   (mapconcat (lambda (e) (format "%s" e)) obj ", ")))))
+                      (condition-case err1
+                          (if fail1 ; ensure no error in this phase
+                              (progn
+                                (pdd-log 'fail "display error with :fail.")
+                                (pdd-funcall fail1 (list (cadr err) (car-safe (cddr err)) err request)))
+                            (pdd-log 'fail "no :fail, just show it.")
+                            (show-error err))
+                        (error
+                         (pdd-log 'fail "oooop, error occurs when display error.")
+                         (show-error err1))))
+                  ;; finally
+                  (ignore-errors (pdd-funcall fine (list request))))))))))
+
+(cl-defmethod pdd-transform-req-headers ((request pdd-request))
+  "Transform headers with stringfy and abbrev replacement in REQUEST."
+  (with-slots (headers) request
     (setf headers
           (cl-loop
            with stringfy = (lambda (p) (cons (format "%s" (car p))
@@ -367,33 +414,42 @@ Besides globally set, it also can be dynamically binding in let.")
                                                (apply #'format (cdr v) (cdr item))
                                              (cdr v))))
            else if (cdr item)
-           collect (funcall stringfy item)))
-    (setf data
-          (when data
-            (if (functionp data) ; Wrap data in a function can avoid be converted
-                (format "%s" (pdd-funcall data headers))
-              (if (atom data) ; Never modify the Content-Type when data is atom/string
-                  (format "%s" data)
-                (let ((ct (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)))
-                  (cond ((string-match-p "/json" (or ct ""))
-                         (setf binaryp t)
-                         (encode-coding-string (json-encode data) 'utf-8))
-                        ((cl-some (lambda (x) (consp (cdr x))) data)
-                         (setf binaryp t)
-                         (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
-                               (concat "multipart/form-data; boundary=" pdd-multipart-boundary))
-                         (pdd-format-formdata data))
-                        (t
-                         (unless ct (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
-                                          "application/x-www-form-urlencoded"))
-                         (pdd-format-params data))))))))
-    (when (and (not binaryp) (stringp data))
-      (setf binaryp (not (multibyte-string-p data))))))
+           collect (funcall stringfy item)))))
+
+(cl-defmethod pdd-transform-req-data ((request pdd-request))
+  "Serialize data to raw string for REQUEST."
+  (with-slots (headers data datas binaryp) request
+    (setf datas
+          (if (functionp data) ; Wrap data in a function can avoid be converted
+              (format "%s" (pdd-funcall data (list headers)))
+            (if (atom data) ; Never modify the Content-Type when data is atom/string
+                (and data (format "%s" data))
+              (let ((ct (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)))
+                (cond ((string-match-p "/json" (or ct ""))
+                       (setf binaryp t)
+                       (encode-coding-string (json-encode data) 'utf-8))
+                      ((cl-some (lambda (x) (consp (cdr x))) data)
+                       (setf binaryp t)
+                       (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
+                             (concat "multipart/form-data; boundary=" pdd-multipart-boundary))
+                       (pdd-format-formdata data))
+                      (t
+                       (unless ct (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
+                                        "application/x-www-form-urlencoded"))
+                       (pdd-format-params data)))))))))
+
+(cl-defmethod pdd-transform-req-finally ((request pdd-request))
+  "Other change should be made for REQUEST."
+  (with-slots (headers datas binaryp backend) request
+    (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
+      (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
+    (when (and (not binaryp) datas)
+      (setf binaryp (not (multibyte-string-p datas))))))
 
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
+  (pdd-log 'req "req:init...")
   (with-slots (url method params headers data binaryp timeout retry sync done fail filter buffer backend) request
-    (pdd-transform-request request) ; transform first
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when params
@@ -402,18 +458,80 @@ Besides globally set, it also can be dynamically binding in let.")
       (setf sync (if pdd-default-sync
                      (if (eq pdd-default-sync :sync) t nil)
                    (if done nil :sync))))
-    ;; user-agent should be always settled
-    (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
-      (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
     (unless method (setf method (if data 'post 'get)))
     (unless timeout (setf timeout pdd-default-timeout))
     (unless retry (setf retry pdd-max-retry))
     (unless buffer (setf buffer (current-buffer)))
-    ;; decorate the callbacks
-    (unless fail (setf fail pdd-default-error-handler))
-    (setf fail (pdd-build request 'fail))
-    (setf done (pdd-build request 'done))
-    (when filter (setf filter (pdd-build request 'filter)))))
+    ;; run all of the installed transformers with request
+    (cl-loop for transformer in pdd-request-transformers
+             do (pdd-log 'req (help-fns-function-name transformer))
+             do (funcall transformer request))))
+
+;; Response
+
+(defvar-local pdd-resp-mark nil)
+(defvar-local pdd-resp-body nil)
+(defvar-local pdd-resp-headers nil)
+(defvar-local pdd-resp-status nil)
+(defvar-local pdd-resp-version nil)
+(defvar-local pdd-current-request nil)
+
+(cl-defmethod pdd-transform-resp-init ()
+  "The most first check, if no problems clean newlines and set `pdd-resp-mark'."
+  (widen) ; in case that the buffer is narrowed
+  (goto-char (point-min))
+  (unless (re-search-forward "\n\n\\|\r\n\r\n" nil t)
+    (user-error "Unable find end of headers"))
+  (setq pdd-resp-mark (point-marker))
+  (save-excursion ; Clean the ^M in headers
+    (while (search-forward "\r" pdd-resp-mark :noerror)
+      (replace-match ""))))
+
+(cl-defmethod pdd-transform-resp-headers ()
+  "Extract status line and headers."
+  (goto-char (point-min))
+  (skip-chars-forward " \t\n")
+  (skip-chars-forward "/HPT")
+  (setq pdd-resp-version (buffer-substring
+                          (point) (progn (skip-chars-forward "0-9.") (point))))
+  (setq pdd-resp-status (read (current-buffer)))
+  (setq pdd-resp-headers (pdd-extract-http-headers)))
+
+(cl-defmethod pdd-transform-resp-decode ()
+  "Decoding buffer automatically."
+  (let* ((content-type (alist-get 'content-type pdd-resp-headers))
+         (binaryp (pdd-binary-type-p content-type))
+         (charset (and (not binaryp) (pdd-detect-charset content-type))))
+    (set-buffer-multibyte (not binaryp))
+    (when charset
+      (decode-coding-region pdd-resp-mark (point-max) charset))))
+
+(cl-defmethod pdd-transform-resp-body ()
+  "Convert response body as `pdd-resp-body'."
+  (with-slots (resp url) pdd-current-request
+    (setq pdd-resp-body
+          (buffer-substring pdd-resp-mark (point-max)))
+    (cond
+     ((functionp resp)
+      (setq pdd-resp-body
+            (pdd-funcall resp (list pdd-resp-body pdd-resp-headers))))
+     ((string-match-p "/json" (alist-get 'content-type pdd-resp-headers))
+      (setq pdd-resp-body
+            (json-read-from-string pdd-resp-body))))))
+
+(cl-defmethod pdd-transform-response (request)
+  "Run all response transformers for REQUEST to get the results."
+  (if pdd-abort-flag
+      (pdd-log 'resp "skip (aborted).")
+    (with-slots (backend) request
+      (setq pdd-current-request request)
+      (cl-loop for transformer in pdd-response-transformers
+             do (pdd-log 'resp (help-fns-function-name transformer))
+             do (funcall transformer))
+      (list pdd-resp-body pdd-resp-headers
+            pdd-resp-status pdd-resp-version request))))
+
+;; Entrance
 
 (cl-defgeneric pdd (backend url &rest _args &key
                             method
@@ -488,7 +606,8 @@ Examples:
            (let ((request (if (cl-typep (car args) 'pdd-request)
                               (car args)
                             (apply #'pdd-request `(:backend ,backend :url ,@args)))))
-             (if pdd-debug (pdd-log 'backend "around pdd..."))
+             (pdd-log 'req "pdd:around...")
+             ;; derived to specified backend to deal with the real request
              (funcall #'cl-call-next-method backend :request request)))
   (declare (indent 1)))
 
@@ -510,18 +629,6 @@ Examples:
 (defvar url-http-response-version)
 
 (defvar pdd-url-extra-filter nil)
-
-(cl-defmethod pdd-transform-response ((_ pdd-url-backend) request)
-  "Extract results from proc buffer for REQUEST."
-  (with-slots (done resp) request
-    ;; don't wasting time on decode/extract when :done has no args
-    (unless (zerop (car (func-arity done)))
-      (let* ((headers (pdd-extract-http-headers))
-             (raw (progn (goto-char url-http-end-of-headers)
-                         (buffer-substring-no-properties (min (+ (point) 1) (point-max)) (point-max))))
-             (body (pdd-transform-result raw headers resp)))
-        ;; pass all these data to done. pity elisp has no values mechanism
-        (list body headers url-http-response-status url-http-response-version request)))))
 
 (cl-defmethod pdd-transform-error ((_ pdd-url-backend) status)
   "Extract error object from callback STATUS."
@@ -549,35 +656,39 @@ Examples:
 
 (cl-defmethod pdd ((backend pdd-url-backend) &key request)
   "Send REQUEST with url.el as BACKEND."
-  (with-slots (url method headers data binaryp resp filter done fail timeout sync) request
+  (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
     (let* ((tag (eieio-object-class backend))
-           (url-request-data data)
+           (url-request-data datas)
            (url-request-extra-headers headers)
            (url-request-method (string-to-unibyte (upcase (format "%s" method))))
            (url-mime-encoding-string "identity")
            (url-proxy-services (or (oref backend proxy-services) url-proxy-services))
            buffer-data data-buffer timer
            (callback (lambda (status)
+                       (pdd-log tag "callback.")
                        (ignore-errors (cancel-timer timer))
                        (setq data-buffer (current-buffer))
                        (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
-                       (unless pdd-abort-flag
+                       (if pdd-abort-flag
+                           (pdd-log tag "skip done (aborted).")
                          (unwind-protect
                              (if-let* ((err (pdd-transform-error backend status)))
-                                 (funcall fail err) ; :fail has been decorated, it's non-nil and has a required argument
-                               (setq buffer-data (apply #'pdd-funcall done (pdd-transform-response backend request))))
+                                 (progn (pdd-log tag "before fail")
+                                        (funcall fail err))
+                               (pdd-log tag "before done")
+                               (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
                            (unless sync (kill-buffer data-buffer))))))
            (proc-buffer (url-retrieve url callback nil t))
            (process (get-buffer-process proc-buffer)))
       ;; log
-      (when pdd-debug
-        (pdd-log tag "%s %s" url-request-method url)
-        (pdd-log tag "HEADER: %S" url-request-extra-headers)
-        (pdd-log tag "DATA: %s" url-request-data)
-        (pdd-log tag "BINARYp: %s" binaryp)
-        (pdd-log tag "Proxy: %s" url-proxy-services)
-        (pdd-log tag "User Agent: %s" url-user-agent)
-        (pdd-log tag "MIME Encoding: %s" url-mime-encoding-string))
+      (pdd-log tag
+        "%s %s"             url-request-method url
+        "HEADER: %S"        url-request-extra-headers
+        "DATA: %s"          url-request-data
+        "BINARY: %s"        binaryp
+        "Proxy: %s"         url-proxy-services
+        "User Agent: %s"    url-user-agent
+        "MIME Encoding: %s" url-mime-encoding-string)
       ;; Weird, but you have to bind `url-user-agent' like this to make it work
       (setf (buffer-local-value 'url-user-agent proc-buffer)
             (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
@@ -591,16 +702,15 @@ Examples:
       (when (numberp timeout)
         (let ((timer-callback
                (lambda ()
+                 (pdd-log 'timer "kill timeout.")
                  (unless data-buffer
-                   (ignore-errors
-                     (stop-process process))
+                   (ignore-errors (stop-process process))
                    (ignore-errors
                      (with-current-buffer proc-buffer
                        (erase-buffer)
                        (setq-local url-http-end-of-headers 30)
                        (insert "HTTP/1.1 408 Operation timeout")))
-                   (ignore-errors
-                     (delete-process process))))))
+                   (ignore-errors (delete-process process))))))
           (setq timer (run-with-timer timeout nil timer-callback))))
       (if (and sync proc-buffer)
           ;; copy from `url-retrieve-synchronously'
@@ -656,46 +766,27 @@ Or switch http backend to `pdd-url-backend' instead:\n
   (unless (and (require 'plz nil t) (executable-find plz-curl-program))
     (error "You should have `plz.el' and `curl' installed before using `pdd-plz-backend'")))
 
-(cl-defmethod pdd-transform-response ((_ pdd-plz-backend) request)
-  "Extract results from proc buffer for REQUEST."
-  (with-slots (done resp) request
-    (unless pdd-abort-flag
-      (widen)
-      (goto-char (point-min))
-      (save-excursion ; Clean the ^M, make it same as in url.el
-        (while (search-forward "\r" nil :noerror) (replace-match "")))
-      (unless (zerop (car (func-arity done)))
-        (let ((url-http-end-of-headers t)
-              (headers (pdd-extract-http-headers)))
-          (url-http-parse-response)
-          (unless (re-search-forward plz-http-end-of-headers-regexp nil t)
-            (signal 'plz-http-error '("Unable to find end of headers")))
-          (list (pdd-transform-result
-                 (buffer-substring-no-properties (point) (point-max))
-                 headers resp)
-                headers url-http-response-status url-http-response-version request))))))
-
-(cl-defmethod pdd-transform-error ((_ pdd-plz-backend) err)
-  "Hacky, but try to unify the ERR data format with url.el."
-  (when (and (consp err) (memq (car err) '(plz-http-error plz-curl-error)))
-    (setq err (caddr err)))
-  (if (not (plz-error-p err)) err
-    (if-let* ((msg (plz-error-message err)))
+(cl-defmethod pdd-transform-error ((_ pdd-plz-backend) error)
+  "Hacky, but try to unify the ERROR data format with url.el."
+  (when (and (consp error) (memq (car error) '(plz-http-error plz-curl-error)))
+    (setq error (caddr error)))
+  (if (not (plz-error-p error)) error
+    (if-let* ((msg (plz-error-message error)))
         (list 'plz-error msg)
-      (if-let* ((curl (plz-error-curl-error err)))
+      (if-let* ((curl (plz-error-curl-error error)))
           (list 'plz-error
                 (concat (format "%s" (or (cdr curl) (car curl)))
                         (pcase (car curl)
                           (2 (when (memq system-type '(cygwin windows-nt ms-dos))
                                pdd-plz-initialize-error-message)))))
-        (if-let* ((res (plz-error-response err))
+        (if-let* ((res (plz-error-response error))
                   (code (plz-response-status res)))
             (list 'error (pdd-http-code-text code) code)
-          err)))))
+          error)))))
 
 (cl-defmethod pdd ((backend pdd-plz-backend) &key request)
   "Send REQUEST with plz as BACKEND."
-  (with-slots (url method headers data binaryp resp filter done fail timeout sync) request
+  (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
     (let* ((tag (eieio-object-class backend))
            (abort-flag) ; used to catch abort action from :filter
            (plz-curl-default-args
@@ -716,41 +807,51 @@ Or switch http backend to `pdd-url-backend' instead:\n
                         (unwind-protect
                             (funcall filter)
                           (setq abort-flag pdd-abort-flag)))))))))
-           (results (lambda () (pdd-transform-response backend request))))
-      ;; data and headers
-      (unless (alist-get "User-Agent" headers nil nil #'string-equal-ignore-case)
-        (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
+           (results (lambda ()
+                      (pdd-log tag "before resp")
+                      (pdd-transform-response request))))
       ;; log
-      (when pdd-debug
-        (pdd-log tag "%s" url)
-        (pdd-log tag "HEADER: %s" headers)
-        (pdd-log tag "DATA: %s" data)
-        (pdd-log tag "BINARYp: %s" binaryp)
-        (pdd-log tag "EXTRA: %s" plz-curl-default-args))
+      (pdd-log tag
+        "%s"          url
+        "HEADER: %s"  headers
+        "DATA: %s"    datas
+        "BINARY: %s"  binaryp
+        "EXTRA: %s"   plz-curl-default-args)
       ;; sync
       (if sync
           (condition-case err
               (let ((res (plz method url
                            :headers headers
-                           :body data
+                           :body datas
                            :body-type (if binaryp 'binary 'text)
                            :decode nil
                            :as results
                            :filter filter-fn
                            :then 'sync
                            :timeout timeout)))
-                (unless abort-flag (apply #'pdd-funcall done res)))
-            (error (funcall fail (pdd-transform-error backend err))))
+                (if abort-flag
+                    (pdd-log tag "skip done (aborted).")
+                  (pdd-log tag "before done")
+                  (pdd-funcall done res)))
+            (error
+             (pdd-log tag "before fail")
+             (funcall fail (pdd-transform-error backend err))))
         ;; async
         (plz method url
           :headers headers
-          :body data
+          :body datas
           :body-type (if binaryp 'binary 'text)
           :decode nil
           :as results
           :filter filter-fn
-          :then (lambda (res) (unless pdd-abort-flag (apply #'pdd-funcall done res)))
-          :else (lambda (err) (funcall fail (pdd-transform-error backend err)))
+          :then (lambda (res)
+                  (if pdd-abort-flag
+                      (pdd-log tag "skip done (aborted).")
+                    (pdd-log tag "before done")
+                    (pdd-funcall done res)))
+          :else (lambda (err)
+                  (pdd-log tag "before fail")
+                  (funcall fail (pdd-transform-error backend err)))
           :timeout timeout)))))
 
 

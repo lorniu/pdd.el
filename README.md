@@ -254,11 +254,13 @@ Returns:
 |--------------------------|----------------------------------|-------------------------|
 | **Backend Support**      | Multiple (url.el + curl via plz) | curl only               |
 | **Fallback Mechanism**   | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
-| **Header Abbreviations** | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
 | **Multipart Uploads**    | ✅ Support                       | ❌ No                   |
-| **Encoding Handling**    | ✅ Auto detection and convert    | ❌ Manual convert       |
-| **Type Conversion**      | ✅ Auto convert                  | ❌️ Manual convert       |
+| **Encoding Handling**    | ✅ Auto detection and decoding   | ❌ Manual decode        |
+| **Type Conversion**      | ✅ Auto conversion               | ❌️ Manual convert       |
 | **Retry Logic**          | ✅ Configurable                  | ❌ None                 |
+| **Interceptors**         | ✅ Support                       | ❌ None                 |
+| **Header Abbreviations** | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
+| **Variadic Callbacks**   | ✅ Yes, make code cleaner        | ❌ No                   |
 | **Streaming Support**    | ✅ Full                          | ✅ Full                 |
 | **Error Handling**       | ✅ Robust                        | ✅ Robust               |
 | **Sync/Async Modes**     | ✅ Both supported                | ✅ Both supported       |

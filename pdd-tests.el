@@ -24,6 +24,10 @@
 ;;; Commentary:
 
 ;; Unit Tests
+;;
+;;   M-x eval-buffer
+;;   M-x ert
+;;
 
 ;;; Code:
 
@@ -158,6 +162,17 @@
   (should (pdd "/post" :headers '(("content-type" . "")) :data '((a . 1)) :done (lambda (r) (setq it r)))
           (equal (alist-get 'data it) "a=1")))
 
+(pdd-deftests content-length ()
+  (should (pdd "/ip" :resp #'identity :done (lambda (r h) (setq it (cons r h))))
+          (should (= (string-to-number (alist-get 'content-length (cdr it)))
+                     (length (car it)))))
+  (should (pdd "/post"
+            :resp #'identity
+            :data '((a . "hello, world, 你好啊"))
+            :done (lambda (r h) (setq it (cons r h))))
+          (should (= (string-to-number (alist-get 'content-length (cdr it)))
+                     (length (car it))))))
+
 (pdd-deftests method-put ()
   (should (pdd "/put"
             :method 'put
@@ -187,17 +202,30 @@
               :done (lambda (r) (setq it r)))
             (and (>= chunks 1) (= (length it) 100)))))
 
-(pdd-deftests binary-data (plz)
+(pdd-deftests fine ()
+  (should (pdd "/uuid"
+            :done (lambda () (car--- r))
+            :fine (lambda () (setq it 666)))
+          (equal it 666))
+  (should (pdd "/uuid"
+            :done (lambda (rs) ())
+            :fine (lambda (rs) (setq it rs)))
+          (cl-typep it #'pdd-request))
+  (should (pdd "/uuid"
+            :done (lambda () (car--- r))
+            :fail (lambda () (car--- r))
+            :fine (lambda () (setq it 676)))
+          (equal it 676)))
+
+(pdd-deftests binary-data ()
   (should (pdd "/bytes/100" :done (lambda (raw) (setq it raw)))
           (= (length it) 100))
   (should (pdd "/stream-bytes/100" :done (lambda (raw) (setq it raw)))
           (= (length it) 100)))
 
-;; The data download with plz not always has enough length of 1024
-;; Maybe a bug, I don't know, but don't want to debug
-(pdd-deftests download-bytes (plz)
-  (should (pdd "/bytes/1024" :done (lambda (data) (setq it (length data))))
-          (= it 1024)))
+(pdd-deftests download-bytes ()
+  (should (pdd "/bytes/1024" :done (lambda (data) (setq it data)))
+          (= (length it) 1024)))
 
 (pdd-deftests download-image ()
   (should (pdd "/image/jpeg" :done (lambda (raw) (setq it raw)))
