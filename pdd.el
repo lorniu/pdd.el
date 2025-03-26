@@ -25,16 +25,29 @@
 
 ;;; Commentary:
 ;;
-;; HTTP Library Adapter, support url.el and plz.el, and can be extended.
+;; A versatile HTTP client library that provides a unified interface making
+;; http requests across multiple backend implementations easily. It is designed
+;; for simplicity, flexibility and cross-platform compatibility.
 ;;
-;;  - API is simple and uniform
-;;  - Support both sync/async request
-;;  - Support streaming request
-;;  - Support retry for timeout
-;;  - Support config proxies for backend
-;;  - Support file upload/download
+;;  - Choose between built-in `url.el' or high-performance `curl' backends. It
+;;    gracefully falls back to `url.el' when `curl' is unavailable without
+;;    requiring code changes.
+;;  - Rich feature set including multipart uploads, streaming support,
+;;    automatic retry strategies, and smart data conversion. Enhances `url.el'
+;;    to support all these capabilities and works well enough.
+;;  - Minimalist yet intuitive API that works consistently across backends.
+;;    Features like variadic callbacks and header abbreviation rules help
+;;    you accomplish more with less code.
+;;  - Extensible architecture makes it easy to add new backends.
 ;;
-;; See README.md of https://github.com/lorniu/pdd.el for more details.
+;;      (pdd "https://httpbin.org/post"
+;;        :headers '((bear "hello world"))
+;;        :params '((name . "jerry") (age . 9))
+;;        :data '((key . "value") (file1 "~/aaa.jpg"))
+;;        :done (lambda (json) (alist-get 'file json)))
+;;
+;; See README.md of https://github.com/lorniu/pdd.el for more
+
 
 ;;; Code:
 
@@ -77,15 +90,15 @@
     (auth        . ("Authorization" . "%s %s"))
     (keep-alive  . ("Connection"    . "Keep-Alive"))
     (ua-emacs    . ("User-Agent"    . "Emacs Agent")))
-  "Some abbrevs can be used in alist of headers for short.
-With the format string style placeholder it can be used to pass args after it.
+  "Header abbreviation system for simpfying request definitions.
 
-Such as:
+Template Placeholders:
+  %s - Replaced with provided arguments
 
-   `(json acc-github
-     (bear \"hello\")
-     (auth \"Bearer\" \"hello\")
-     (\"Authorization\" . \"Bearer hello\"))
+Usage Examples:
+  json → (\"Content-Type\" . \"application/json\")
+  (bear \"token\") → (\"Authorization\" . \"Bearer token\")
+  (auth \"Basic\" \"creds\") → (\"Authorization\" . \"Basic creds\")
 
 They are be replaced when transforming request.")
 
@@ -106,7 +119,7 @@ FMT and ARGS are arguments same as function `message'."
         'utf-8))))
 
 (defun pdd-binary-type-p (content-type)
-  "Check if current CONTENT-TYPE is binary."
+  "Check if current CONTENT-TYPE represents binary data."
   (when content-type
     (cl-destructuring-bind (mime sub)
         (string-split content-type "/" nil "[ \n\r\t]")
@@ -118,7 +131,7 @@ FMT and ARGS are arguments same as function `message'."
                      sub)))))))
 
 (defun pdd-format-params (alist)
-  "Format ALIST to k=v style query string."
+  "Convert an ALIST of parameters into a URL-encoded query string."
   (mapconcat (lambda (arg)
                (format "%s=%s"
                        (url-hexify-string (format "%s" (car arg)))
@@ -126,13 +139,15 @@ FMT and ARGS are arguments same as function `message'."
              (delq nil alist) "&"))
 
 (defun pdd-gen-url-with-params (url params)
-  "Concat PARAMS to URL, and return it."
+  "Generate a URL by appending PARAMS to URL with proper query string syntax."
   (if-let* ((ps (if (consp params) (pdd-format-params params) params)))
       (concat url (unless (string-match-p "[?&]$" url) (if (string-match-p "\\?" url) "&" "?")) ps)
     url))
 
 (defun pdd-format-formdata (alist)
-  "Generate multipart/formdata string from ALIST."
+  "Generate multipart/form-data payload from ALIST.
+
+Handles both regular fields and file uploads with proper boundary formatting."
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (cl-loop for (key . value) in alist for i from 1
@@ -156,7 +171,7 @@ FMT and ARGS are arguments same as function `message'."
     (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun pdd-transform-result (data headers &optional transformer)
-  "Transform responsed DATA according HEADERS and TRANSFORMER."
+  "Transform response DATA according to HEADERS and TRANSFORMER."
   (if pdd-debug (pdd-log nil "transform response..."))
   (let* ((content-type (alist-get 'content-type headers))
          (binaryp (pdd-binary-type-p content-type)))
@@ -164,14 +179,14 @@ FMT and ARGS are arguments same as function `message'."
                    (encode-coding-string data 'binary)
                  (decode-coding-string data (pdd-detect-charset content-type))))
     (if (functionp transformer)
-        (pdd-funcall transformer data headers)
+        (pdd-funcall transformer (list data headers))
       (cond
        ((string-match-p "application/json" content-type)
         (json-read-from-string data))
        (t data)))))
 
 (defun pdd-extract-http-headers ()
-  "Extract http headers from the current responsed buffer."
+  "Extract http headers from the current response buffer."
   (save-excursion
     (save-restriction
       (widen)
@@ -181,11 +196,11 @@ FMT and ARGS are arguments same as function `message'."
                collect (cons (car el) (string-trim (cdr el)))))))
 
 (defun pdd-http-code-text (http-status-code)
-  "Get the text description of the HTTP-STATUS-CODE."
+  "Return text description of the HTTP-STATUS-CODE."
   (caddr (assoc http-status-code url-http-codes)))
 
-(defun pdd-funcall (fn &rest args)
-  "Funcall FN and pass some of ARGS to it according its arity."
+(defun pdd-funcall (fn args)
+  "Call function FN with the first N arguments from ARGS, where N is FN's arity."
   (declare (indent 1))
   (let ((n (car (func-arity fn))))
     (apply fn (cl-loop for i from 1 to n for x in args collect x))))
@@ -251,7 +266,7 @@ Besides globally set, it also can be dynamically binding in let.")
   "Abstract base class for HTTP request configs.")
 
 (cl-defmethod pdd-build ((request pdd-request) (_ (eql 'fail)))
-  "Create the :fail callback for REQUEST."
+  "Construct the :fail callback handler for REQUEST."
   (with-slots (retry fail fine backend) request
     (let ((fail fail) (tag (eieio-object-class backend)))
       (lambda (err)
@@ -285,7 +300,7 @@ Besides globally set, it also can be dynamically binding in let.")
             (ignore-errors (pdd-funcall fine request))))))))
 
 (cl-defmethod pdd-build ((request pdd-request) (_ (eql 'done)))
-  "Create the :done callback for REQUEST."
+  "Construct the :done callback handler for REQUEST."
   (with-slots (done fail fine buffer backend) request
     (let ((args (cl-loop for arg in
                          (if (or (null done) (equal (func-arity done) '(0 . many)))
@@ -310,7 +325,7 @@ Besides globally set, it also can be dynamically binding in let.")
              (ignore-errors (pdd-funcall ,fine ,request))))))))
 
 (cl-defmethod pdd-build ((request pdd-request) (_ (eql 'filter)))
-  "Create the :filter callback for REQUEST."
+  "Construct the :filter callback handler for REQUEST."
   (with-slots (filter fail backend) request
     (let ((filter filter) (tag (eieio-object-class backend)))
       (lambda ()
@@ -414,32 +429,61 @@ Besides globally set, it also can be dynamically binding in let.")
                             timeout
                             retry
                             &allow-other-keys)
-  "Send HTTP request using the given BACKEND.
+  "Send HTTP request using the specified BACKEND.
 
-Keyword arguments:
-  - URL: The URL to send the request to.
-  - PARAMS: The data to include in the url.  It's a string or alist.
-  - METHOD: Request method, symbol like \\='post.  If nil guess by data.
-  - HEADERS: Additional headers to include in the request.  Alist.
-  - DATA: The data to include in the request.  If this is a string, it will be
-          sent directly as request body.  If this is a list and every element
-          is (key . value) then this will be joined to a string like a=1&b=2 and
-          then be sent.  If this is a list and some element is (key filename)
-          format, then the list will be normalized as multipart formdata string
-          and be sent.
-  - RESP: Whether or how to auto encode the response content.
-          Currently this should a function with responsed string as argument.
-          For example, make this with value #\\='identity should make
-          the raw responsed string is passed to DONE without any parsed..
-  - FILTER: A function to be called every time when some data returned.
-  - DONE: A function to be called when the request succeeds.
-  - FAIL: A function to be called when the request fails.
-  - FINE: A function to be called at last, no matter done or fail.
-  - RETRY: How many times it can retry for timeout.  Number.
-  - TIMEOUT: Set connect timeout for request.  Number.
-  - SYNC: Non-nil means request synchronized.  Boolean.
+This is a generic function with implementations provided by backend classes.
 
-If request async, return the process behind the request."
+Parameters:
+  BACKEND  - HTTP backend instance
+  URL      - Target URL (string)
+
+Keyword Arguments:
+  :METHOD  - HTTP method (symbol, e.g. `get, `post, `put), defaults to `get
+  :PARAMS  - URL query parameters, accepts:
+             * String - appended directly to URL
+             * Alist - converted to key=value&... format
+  :HEADERS - Request headers, supports formats:
+             * Regular: (\"Header-Name\" . \"value\")
+             * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
+             * Parameterized abbrevs: (bear \"token\")
+  :DATA    - Request body data, accepts:
+             * String - sent directly
+             * Alist - converted to formdata or JSON based on Content-Type
+             * File uploads: ((key filepath))
+  :FILTER  - Filter function called during data reception, signature:
+             (lambda (&optional headers process request))
+  :RESP    - Response transformer function for raw response data, signature:
+             (lambda (data &optional headers))
+  :DONE    - Success callback, signature:
+             (lambda (&optional body headers status-code http-version request))
+  :FAIL    - Failure callback, signature:
+             (&optional error-message http-status-code error-object request)
+  :FINE    - Final callback (always called), signature:
+             (&optional request-instance)
+  :SYNC    - Whether to execute synchronously (boolean)
+  :TIMEOUT - Timeout in seconds
+  :RETRY   - Number of retry attempts on timeout
+
+Returns:
+  Response data in sync mode, process object in async mode.
+
+Examples:
+  ;; Simple GET request
+  (pdd some-backend \"https://api.example.com\")
+
+  ;; POST JSON data
+  (pdd some-backend \"https://api.example.com/api\"
+       :headers \\='(json)
+       :data \\='((key . \"value\")))
+
+  ;; Multipart request with file upload
+  (pdd some-backend \"https://api.example.com/upload\"
+       :data \\='((file \"path/to/file\")))
+
+  ;; Async request with callbacks
+  (pdd some-backend \"https://api.example.com/data\"
+       :done (lambda (data) (message \"Got: %S\" data))
+       :fail (lambda (err) (message \"Error: %S\" err)))."
   (:method :around ((backend pdd-backend) &rest args)
            (let ((request (if (cl-typep (car args) 'pdd-request)
                               (car args)

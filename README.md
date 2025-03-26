@@ -1,13 +1,13 @@
-# HTTP Library Adapter for Emacs.
+# HTTP Library for Emacs
 
-It support `url.el` and [plz.el](https://github.com/alphapapa/plz.el), and can be extended.
+A versatile HTTP client library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
 
-- Its API is simple and uniform
-- Support both **sync/async** request
-- Support **streaming** request
-- Support **retry** for timeout
-- Support **proxies** configuration
-- Support file **upload/download**
+ - Choose between built-in `url.el` or high-performance `curl` backends. It gracefully falls back to `url.el` when `curl` is unavailable without requiring code changes.
+ - Rich feature set including multipart uploads, streaming support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
+ - Minimalist yet intuitive API that works consistently across backends. Features like variadic callbacks and header abbreviation rules help you accomplish more with less code.
+ - Extensible architecture makes it easy to add new backends.
+
+Why this name?
 
 > In my language, pdd is the meaning of "get the thing you want quickly"
 
@@ -139,11 +139,10 @@ And try to send requests like this:
 (pdd "https://httpbin.org/ip" :filter (lambda () (get-buffer-process (current-buffer))))
 (pdd "https://httpbin.org/ip" :filter (lambda (headers) (message "%s" headers)))
 
-;; Arguments of fail: (&optional error-message http-status-code request-instance)
-(pdd "https://httpbin.org/ip7" :fail (lambda ()        (message "pity.")))
-(pdd "https://httpbin.org/ip7" :fail (lambda (msg)     (message "%s" msg)))
-(pdd "https://httpbin.org/ip7" :fail (lambda (_ code)  (message "%s" code)))
-(pdd "https://httpbin.org/ip7" :fail (lambda (_ _ req) (message "%s" (oref req url))))
+;; Arguments of fail: (&optional error-message http-status error-object request-instance)
+(pdd "https://httpbin.org/ip7" :fail (lambda ()       (message "pity.")))
+(pdd "https://httpbin.org/ip7" :fail (lambda (msg)    (message "%s" msg)))
+(pdd "https://httpbin.org/ip7" :fail (lambda (_ code) (message "%s" code)))
 
 ;; Arguments of fine: (&optional request-instance)
 (pdd "https://httpbin.org/ip" :fine (lambda () (message "bye")))
@@ -210,33 +209,61 @@ Download file with progress bar display:
                             timeout
                             retry
                             &allow-other-keys)
-  "Send HTTP request using the given BACKEND.
+  "Send HTTP request using the specified BACKEND.
 
-Keyword arguments:
-  - URL: The URL to send the request to.
-  - PARAMS: The data to include in the url.  It's a string or alist.
-  - METHOD: Request method, symbol like 'post.  If nil guess by data.
-  - HEADERS: Additional headers to include in the request.  Alist.
-  - DATA: The data to include in the request.  If this is a string, it will be
-          sent directly as request body.  If this is a list and every element
-          is (key . value) then this will be joined to a string like a=1&b=2 and
-          then be sent.  If this is a list and some element is (key filename)
-          format, then the list will be normalized as multipart formdata string
-          and be sent.
-  - RESP: Whether or how to auto encode the response content.
-          Currently this should a function with responsed string as argument.
-          For example, make this with value #'identity should make
-          the raw responsed string is passed to DONE without any parsed.
-  - FILTER: A function to be called every time when some data returned.
-  - DONE: A function to be called when the request succeeds.
-  - FAIL: A function to be called when the request fails.
-  - FINE: A function to be called at last, no matter done or fail.
-  - RETRY: How many times it can retry for timeout.  Number.
-  - TIMEOUT: Set connect timeout for request.  Number.
-  - SYNC: Non-nil means request synchronized.  Boolean.
+This is a generic function with implementations provided by backend classes.
 
-If request async, return the process behind the request."）
+Parameters:
+  BACKEND  - HTTP backend instance (subclass of `pdd-backend')
+  URL      - Target URL (string)
+
+Keyword Arguments:
+  :METHOD  - HTTP method (symbol, e.g. `get, `post, `put), defaults to `get
+  :PARAMS  - URL query parameters, accepts:
+             * String - appended directly to URL
+             * Alist - converted to key=value&... format
+  :HEADERS - Request headers, supports formats:
+             * Regular: ("Header-Name" . "value")
+             * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
+             * Parameterized abbrevs: (bear "token")
+  :DATA    - Request body data, accepts:
+             * String - sent directly
+             * Alist - converted to formdata or JSON based on Content-Type
+             * File uploads: ((key filepath))
+  :FILTER  - Filter function called during data reception, signature:
+             (lambda (&optional headers process request))
+  :RESP    - Response transformer function for raw response data, signature:
+             (lambda (data &optional headers))
+  :DONE    - Success callback, signature:
+             (lambda (&optional body headers status-code http-version request))
+  :FAIL    - Failure callback, signature:
+             (&optional error-message http-status-code error-object request)
+  :FINE    - Final callback (always called), signature:
+             (&optional request-instance)
+  :SYNC    - Whether to execute synchronously (boolean)
+  :TIMEOUT - Timeout in seconds
+  :RETRY   - Number of retry attempts on timeout
+
+Returns:
+  Response data in sync mode, process object in async mode.)
 ```
+
+## Comparison with plz.el
+
+| Feature                  | pdd.el                           | plz.el                  |
+|--------------------------|----------------------------------|-------------------------|
+| **Backend Support**      | Multiple (url.el + curl via plz) | curl only               |
+| **Fallback Mechanism**   | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
+| **Header Abbreviations** | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
+| **Multipart Uploads**    | ✅ Support                       | ❌ No                   |
+| **Encoding Handling**    | ✅ Auto detection and convert    | ❌ Manual convert       |
+| **Type Conversion**      | ✅ Auto convert                  | ❌️ Manual convert       |
+| **Retry Logic**          | ✅ Configurable                  | ❌ None                 |
+| **Streaming Support**    | ✅ Full                          | ✅ Full                 |
+| **Error Handling**       | ✅ Robust                        | ✅ Robust               |
+| **Sync/Async Modes**     | ✅ Both supported                | ✅ Both supported       |
+| **Customization**        | ✅ Extensive                     | ⚠️ Limited               |
+| **Dependencies**         | None (url.el built-in)           | Requires curl binary    |
 
 ## Miscellaneous
 
