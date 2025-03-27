@@ -98,6 +98,28 @@
   (should (equal (pdd-detect-charset "application/json;charset=gbk") 'gbk))
   (should (equal (pdd-detect-charset "text/html; x=3,  charset=gbk") 'gbk)))
 
+(ert-deftest pdd-test-format-formdata ()
+  (should (equal (pdd-format-formdata nil) ""))
+  (should (equal (let ((pdd-multipart-boundary "666")) (pdd-format-formdata '((a . 1))))
+                 "--666\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--666--"))
+  (should (string-match-p "--666\r
+Content-Disposition: form-data; name=\"name\"\r
+\r
+John\r
+--666\r
+Content-Disposition: form-data; name=\"age\"\r
+\r
+30\r
+--666\r
+Content-Disposition: form-data; name=\"file\"; filename=\"pdd-test-.*.txt\"\r
+Content-Type: application/octet-stream\r
+\r
+test\r\n--666--" (let ((pdd-multipart-boundary "666")
+                       (temp-file (make-temp-file "pdd-test-" nil ".txt" "test")))
+                   (unwind-protect
+                       (pdd-format-formdata `(("name" . "John") ("age" . "30") (file ,temp-file)))
+                     (delete-file temp-file))))))
+
 
 ;;; Request Tests
 
@@ -235,10 +257,11 @@
   (let* ((fname (make-temp-file "pdd-"))
          (_buffer (with-temp-file fname (insert "hello"))))
     (should (pdd "/post"
-              :data `((from . lorniu) (f ,fname))
+              :data `((from . lorniu) (f ,fname) (to . where))
               :done (lambda (r) (setq it r)))
             (ignore-errors (delete-file fname))
-            (equal (cdar (alist-get 'form it)) "hello"))))
+            (and (equal (alist-get 'f (alist-get 'files it)) "hello")
+                 (equal (alist-get 'to (alist-get 'form it)) "where")))))
 
 (pdd-deftests authentication ()
   (should (pdd "/basic-auth/user/passwd"

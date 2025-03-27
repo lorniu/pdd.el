@@ -158,28 +158,37 @@ rest arguments."
 (defun pdd-format-formdata (alist)
   "Generate multipart/form-data payload from ALIST.
 
-Handles both regular fields and file uploads with proper boundary formatting."
+Handles both regular fields and file uploads with proper boundary formatting.
+
+ALIST format:
+  Regular field: (KEY . VALUE)
+  File upload: (KEY FILENAME [CONTENT-TYPE])
+
+Returns the multipart data as a unibyte string."
   (with-temp-buffer
     (set-buffer-multibyte nil)
-    (cl-loop for (key . value) in alist for i from 1
-             for filep = nil for contentype = nil
-             do (setq key (format "%s" key))
-             do (if (consp value) ; ((afile "~/aaa.jpg" "image/jpeg"))
-                    (setq contentype (or (cadr value) "application/octet-stream")
-                          value (format "%s" (car value)) filep t)
-                  (setq value (format "%s" value)))
-             for newline = "\r\n"
-             do (insert "--" pdd-multipart-boundary newline)
-             ;; It's not efficient to do this in emacs, but it does work
-             if filep do (let ((fn (url-encode-url (url-file-nondirectory value))))
-                           (insert "Content-Disposition: form-data; name=\"" key "\" filename=\"" fn "\"" newline)
-                           (insert "Content-Type: " contentype newline newline)
-                           (insert-file-contents-literally value)
-                           (goto-char (point-max)))
-             else do (insert "Content-Disposition: form-data; name=\"" key "\"" newline newline value)
-             if (< i (length alist)) do (insert newline)
-             else do (insert newline "--" pdd-multipart-boundary "--"))
-    (buffer-substring-no-properties (point-min) (point-max))))
+    (when alist
+      (insert "--" pdd-multipart-boundary "\r\n")
+      (cl-loop for (key . value) in alist
+               for i from 1
+               for is-last = (= i (length alist))
+               for key-str = (format "%s" key)
+               if (consp value) ; File: (FILENAME [MIME-TYPE])
+               do (let* ((filename (expand-file-name (car value)))
+                         (mime-type (or (cadr value) "application/octet-stream"))
+                         (encoded-filename (url-encode-url (file-name-nondirectory filename))))
+                    (insert (format "Content-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n"
+                                    key-str encoded-filename))
+                    (insert (format "Content-Type: %s\r\n\r\n" mime-type))
+                    (insert-file-contents-literally filename)
+                    (goto-char (point-max)))
+               else ; Regular field
+               do (insert (format "Content-Disposition: form-data; name=\"%s\"\r\n\r\n%s"
+                                  key-str (or value "")))
+               do (insert "\r\n--" pdd-multipart-boundary)
+               do (unless is-last (insert "\r\n")))
+      (insert "--"))
+    (buffer-string)))
 
 (defun pdd-extract-http-headers ()
   "Extract http headers from the current response buffer."
