@@ -3,9 +3,14 @@
 A versatile HTTP client library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
 
  - Choose between built-in `url.el` or high-performance `curl` backends. It gracefully falls back to `url.el` when `curl` is unavailable without requiring code changes.
- - Rich feature set including multipart uploads, streaming support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
+ - Rich feature set including multipart uploads, streaming support, cookie-jar support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
  - Minimalist yet intuitive API that works consistently across backends. Features like variadic callbacks and header abbreviation rules help you accomplish more with less code.
  - Extensible architecture makes it easy to add new backends.
+
+Table of contents:
+- [Usage](#Usage) · [API](#API) · [Examples](#Examples)
+- [How to manage cookies](docs/cookie-jar.md)
+- [Compare with plz.el](#Comparison)
 
 Why this name?
 
@@ -248,24 +253,25 @@ Returns:
   Response data in sync mode, process object in async mode.)
 ```
 
-## Comparison with plz.el
+## Comparison
 
-| Feature                  | pdd.el                           | plz.el                  |
-|--------------------------|----------------------------------|-------------------------|
-| **Backend Support**      | Multiple (url.el + curl via plz) | curl only               |
-| **Fallback Mechanism**   | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
-| **Multipart Uploads**    | ✅ Support                       | ❌ No                   |
-| **Encoding Handling**    | ✅ Auto detection and decoding   | ❌ Manual decode        |
-| **Type Conversion**      | ✅ Auto conversion               | ❌️ Manual convert       |
-| **Retry Logic**          | ✅ Configurable                  | ❌ None                 |
-| **Interceptors**         | ✅ Support                       | ❌ None                 |
-| **Header Abbreviations** | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
-| **Variadic Callbacks**   | ✅ Yes, make code cleaner        | ❌ No                   |
-| **Streaming Support**    | ✅ Full                          | ✅ Full                 |
-| **Error Handling**       | ✅ Robust                        | ✅ Robust               |
-| **Sync/Async Modes**     | ✅ Both supported                | ✅ Both supported       |
-| **Customization**        | ✅ Extensive                     | ⚠️ Limited               |
-| **Dependencies**         | None (url.el built-in)           | Requires curl binary    |
+| Feature                   | pdd.el                           | plz.el                  |
+|---------------------------|----------------------------------|-------------------------|
+| **Backend Support**       | Multiple (url.el + curl via plz) | curl only               |
+| **Fallback Mechanism**    | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
+| **Multipart Uploads**     | ✅ Support                       | ❌ No                   |
+| **Encoding Handling**     | ✅ Auto detection and decoding   | ❌ Manual decode        |
+| **Type Conversion**       | ✅ Auto conversion               | ❌️ Manual convert       |
+| **Retry Logic**           | ✅ Configurable                  | ❌ None                 |
+| **Req/Resp Interceptors** | ✅ Support                       | ❌ None                 |
+| **Auto Cookies manage**   | ✅ Support with cookie-jar       | ❌ No                   |
+| **Header Abbreviations**  | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
+| **Variadic Callbacks**    | ✅ Yes, make code cleaner        | ❌ No                   |
+| **Streaming Support**     | ✅ Full                          | ✅ Full                 |
+| **Error Handling**        | ✅ Robust                        | ✅ Robust               |
+| **Sync/Async Modes**      | ✅ Both supported                | ✅ Both supported       |
+| **Customization**         | ✅ Extensive                     | ⚠️ Limited              |
+| **Dependencies**          | None (url.el built-in)           | Requires curl binary    |
 
 ## Miscellaneous
 

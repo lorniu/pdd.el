@@ -33,8 +33,8 @@
 ;;    gracefully falls back to `url.el' when `curl' is unavailable without
 ;;    requiring code changes.
 ;;  - Rich feature set including multipart uploads, streaming support,
-;;    automatic retry strategies, and smart data conversion. Enhances `url.el'
-;;    to support all these capabilities and works well enough.
+;;    cookie-jar support, automatic retry strategies, and smart data conversion.
+;;    Enhances `url.el' to support all these capabilities and works well enough.
 ;;  - Minimalist yet intuitive API that works consistently across backends.
 ;;    Features like variadic callbacks and header abbreviation rules help
 ;;    you accomplish more with less code.
@@ -200,6 +200,71 @@ Returns the multipart data as a unibyte string."
       (cl-loop for el in (mail-header-extract)
                collect (cons (car el) (string-trim (cdr el)))))))
 
+(defun pdd-encode-time-string (date-string)
+  "Parse HTTP DATE-STRING into Emacs internal time format."
+  (let* ((date-time (parse-time-string date-string)))
+    (unless (car date-time)
+      (setq date-time (append '(0 0 0) (nthcdr 3 date-time))))
+    (apply #'encode-time date-time)))
+
+(defun pdd-split-string-from-= (string &optional url-decode)
+  "Split STRING at the first = into two parts.
+Try to unhex the second part when URL-DECODE is not nil."
+  (let* ((p (string-search "=" string))
+         (k (if p (substring string 0 p) string))
+         (v (if p (substring string (1+ p)))))
+    (cons k (when (and v (not (string-empty-p v)))
+              (funcall (if url-decode #'url-unhex-string #'identity)
+                       (string-trim v))))))
+
+(defun pdd-parse-set-cookie (cookie-string &optional url-decode)
+  "Parse HTTP Set-Cookie COOKIE-STRING with optional URL-DECODE.
+
+Link:
+  https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie
+  https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-rfc6265bis-11
+
+Return a plist containing all cookie attributes."
+  (when (and (stringp cookie-string) (not (string-empty-p cookie-string)))
+    (when-let* ((pairs (split-string (string-trim cookie-string) ";\\s *" t))
+                (names (pdd-split-string-from-= (car pairs) url-decode))
+                (cookie (list :name (car names) :value (cdr names))))
+      (cl-loop for pair in (cdr pairs)
+               for (k . v) = (pdd-split-string-from-= pair url-decode)
+               do (pcase (setq k (intern (concat ":" (downcase k))))
+                    (:domain
+                     (when v (plist-put cookie k v)))
+                    (:path
+                     (when v (plist-put cookie k (downcase v))))
+                    (:expires
+                     (when-let* ((date (ignore-errors (pdd-encode-time-string v))))
+                       (plist-put cookie k date)))
+                    (:max-age
+                     (when (and v (string-match-p "^-?[0-9]+$" v))
+                       (plist-put cookie k (string-to-number v))))
+                    (:samesite
+                     (when (and v (member (downcase v) '("strict" "lax" "none")))
+                       (plist-put cookie k (downcase v))))
+                    (:priority
+                     (when (and v (member (downcase v) '("low" "medium" "high")))
+                       (plist-put cookie k (downcase v))))
+                    ((or :secure :httponly :partitioned)
+                     (plist-put cookie k t))
+                    (_ nil))
+               finally return (if (plist-get cookie :domain) cookie
+                                (plist-put cookie :host-only t))))))
+
+(defun pdd-parse-request-cookies (cookies-string)
+  "Parse an HTTP request COOKIES-STRING to list contains every cookie as a plist."
+  (unless (or (null cookies-string) (string-empty-p cookies-string))
+    (let ((pairs (split-string cookies-string "; ?" t)))
+      (mapcar (lambda (pair)
+                (let ((key-value (split-string pair "=" t)))
+                  (when (= (length key-value) 2)
+                    (list :name (string-trim (car key-value))
+                          :value (string-trim (cadr key-value))))))
+              pairs))))
+
 (defun pdd-http-code-text (http-status-code)
   "Return text description of the HTTP-STATUS-CODE."
   (caddr (assoc http-status-code url-http-codes)))
@@ -233,6 +298,20 @@ Besides globally set, it also can be dynamically binding in let.")
   (lambda (err) (string-match-p "timeout\\|408" (format "%s" err)))
   "Function determine whether should retry the request.")
 
+(defvar pdd-default-cookie-jar nil
+  "Default cookie jar used when not specified in requests.
+
+The value can be either:
+- A cookie-jar instance, or
+- A function that returns a cookie-jar.
+
+When the value is a function, it may accept either:
+- No arguments, or
+- A single argument (the request instance).
+
+This variable is used as a fallback when no cookie jar is explicitly
+provided in individual requests.")
+
 (defvar-local pdd-abort-flag nil
   "Non-nil means to ignore following request progress.")
 
@@ -241,6 +320,7 @@ Besides globally set, it also can be dynamically binding in let.")
     pdd-transform-req-filter
     pdd-transform-req-fail
     pdd-transform-req-headers
+    pdd-transform-req-cookies
     pdd-transform-req-data
     pdd-transform-req-finally)
   "List of functions that transform the request object in sequence.
@@ -258,6 +338,7 @@ consequences.")
 (defvar pdd-response-transformers
   '(pdd-transform-resp-init
     pdd-transform-resp-headers
+    pdd-transform-resp-cookies
     pdd-transform-resp-decode
     pdd-transform-resp-body)
   "List of functions that process and transform the response buffer sequentially.
@@ -288,26 +369,160 @@ you fully understand their interdependencies.")
     (let ((inst (cl-call-next-method)))
       (prog1 inst (oset-default class insts `((,key . ,inst) ,@insts))))))
 
+;; Cookie
+
+(defclass pdd-cookie-jar ()
+  ((cookies :initarg :cookies
+            :initform nil
+            :type list
+            :documentation "Alist of (domain . cookie-list) where each cookie is a plist")
+   (persist :initarg :persist
+            :initform nil
+            :type (or string null)
+            :documentation "Location persist cookies to"))
+  :documentation "Cookie jar for storing and managing HTTP cookies.")
+
+(defun pdd-cookie-expired-p (cookie)
+  "Check if COOKIE has expired."
+  (let ((expires (plist-get cookie :expires))
+        (max-age (plist-get cookie :max-age))
+        (created-at (plist-get cookie :created-at)))
+    (cond
+     ((and created-at max-age)
+      (time-less-p (time-add created-at (seconds-to-time max-age))
+                   (current-time)))
+     ((and expires (stringp expires))
+      (time-less-p (date-to-time expires) (current-time))))))
+
+(cl-defgeneric pdd-cookie-jar-get (jar domain &optional path secure)
+  "Get cookies from JAR matching DOMAIN, PATH and SECURE flag."
+  (:method ((jar pdd-cookie-jar) domain &optional path secure)
+           (with-slots (cookies) jar
+             (cl-loop
+              for (cookie-domain . items) in cookies
+              when (string-match-p (concat "\\.?" (regexp-quote domain) "$") cookie-domain)
+              append (cl-loop
+                      for cookie in items
+                      when (and
+                            (not (pdd-cookie-expired-p cookie))
+                            (or (null path)
+                                (string-prefix-p (or (plist-get cookie :path) "/") path))
+                            (not (and (null secure) (plist-get cookie :secure))))
+                      collect cookie)))))
+
+(cl-defgeneric pdd-cookie-jar-put (jar domain cookie-list)
+  "Add one or multiple cookies from COOKIE-LIST to the JAR for specified DOMAIN."
+  (:method ((jar pdd-cookie-jar) domain cookie-list)
+           (with-slots (cookies) jar
+             (dolist (cookie (if (plist-get cookie-list :name) (list cookie-list) cookie-list))
+               (let ((items (assoc-string domain cookies)))
+                 (if items
+                     (setcdr items
+                             (cl-remove-if
+                              (lambda (item)
+                                (or (null (plist-get item :name))
+                                    (and (equal (plist-get item :name)
+                                                (plist-get cookie :name))
+                                         (equal (plist-get item :path)
+                                                (plist-get cookie :path)))))
+                              (cdr items)))
+                   (setf items (cons domain nil) cookies (cons items cookies)))
+                 (when (plist-get cookie :max-age)
+                   (plist-put cookie :created-at (current-time)))
+                 (setcdr items (cons cookie (cdr items)))))
+             (pdd-cookie-jar-persist jar))))
+
+(cl-defgeneric pdd-cookie-jar-persist (jar)
+  "Save cookies to persistent FILE for JAR."
+  (:method ((jar pdd-cookie-jar))
+           (with-slots (cookies persist) jar
+             (when (stringp persist)
+               (condition-case err
+                   (with-temp-file (setf persist (expand-file-name persist))
+                     (let ((print-level nil) (print-length nil))
+                       (when cookies
+                         (pp (cl-loop for (domain . items) in cookies
+                                      collect (cons domain (cl-remove-if #'pdd-cookie-expired-p items)))
+                             (current-buffer)))
+                       jar))
+                 (error (user-error "Persist cookie failed. %s" err)))))))
+
+(cl-defgeneric pdd-cookie-jar-load (jar &optional required)
+  "Load cookies from persist file into the cookie JAR.
+If REQUIRED is non-nil, raise error when persist file not found."
+  (:method ((jar pdd-cookie-jar) &optional required)
+           (with-slots (cookies persist) jar
+             (when persist
+               (when (or (not (stringp persist))
+                         (not (file-writable-p (setf persist (expand-file-name persist))))
+                         (and (file-exists-p persist)
+                              (not (file-readable-p persist))))
+                 (user-error "Cookie file `%s' is unavailable" persist))
+               (if (file-exists-p persist)
+                   (with-temp-buffer
+                     (insert-file-contents-literally persist)
+                     (unless (string-empty-p (buffer-substring (point-min) (point-max)))
+                       (setf cookies (read (current-buffer)))))
+                 (if required (user-error "Cookie file `%s' is not exist" persist)))
+               jar))))
+
+(cl-defgeneric pdd-cookie-jar-clear (jar &optional domain not-persist)
+  "Clear cookies from JAR based on DOMAIN and expiration status.
+
+If DOMAIN is:
+- a string: delete only cookies matching this domain
+- t: delete all cookies regardless of domain
+- nil: only delete expired cookies (default)
+
+When NOT-PERSIST is non-nil, changes are not saved to persistent storage.
+If JAR is nil, operates on the default cookie jar."
+  (:method ((jar pdd-cookie-jar) &optional domain not-persist)
+           (with-slots (cookies) jar
+             (when-let* ((jar (or jar pdd-default-cookie-jar)))
+               (when cookies
+                 (if (stringp domain)
+                     (setf cookies (cl-remove-if
+                                    (lambda (cookie) (string-match-p domain (car cookie)))
+                                    cookies))
+                   (if (eq domain t) (setf cookies nil)))
+                 (setq cookies
+                       (cl-loop for (domain . items) in cookies
+                                for fresh = (cl-remove-if #'pdd-cookie-expired-p items)
+                                when fresh collect (cons domain fresh)))
+                 (unless not-persist (pdd-cookie-jar-persist jar)))
+               jar)))
+  (unless (or jar pdd-default-cookie-jar)
+    (cl-call-next-method (or jar pdd-default-cookie-jar) domain not-persist)))
+
+(cl-defmethod initialize-instance :after ((jar pdd-cookie-jar) &rest _)
+  "Load or persist cookies if necessary."
+  (with-slots (cookies persist) jar
+    (when persist
+      (if cookies
+          (pdd-cookie-jar-persist jar)
+        (pdd-cookie-jar-load jar)))))
+
 ;; Request
 
 (defclass pdd-request ()
-  ((url      :initarg :url      :type string)
-   (method   :initarg :method   :type (or symbol string) :initform nil)
-   (params   :initarg :params   :type (or string list)   :initform nil)
-   (headers  :initarg :headers  :type list               :initform nil)
-   (data     :initarg :data     :type (or function string list) :initform nil)
-   (datas    :initform nil      :type (or string null))
-   (binaryp  :initform nil      :type boolean)
-   (resp     :initarg :resp     :type (or function null) :initform nil)
-   (timeout  :initarg :timeout  :type (or number null)   :initform nil)
-   (retry    :initarg :retry    :type (or number null)   :initform nil)
-   (filter   :initarg :filter   :type (or function null) :initform nil)
-   (done     :initarg :done     :type (or function null) :initform nil)
-   (fail     :initarg :fail     :type (or function null) :initform nil)
-   (fine     :initarg :fine     :type (or function null) :initform nil)
-   (sync     :initarg :sync)
-   (buffer   :initarg :buffer :initform nil)
-   (backend   :initarg :backend))
+  ((url        :initarg :url      :type string)
+   (method     :initarg :method   :type (or symbol string) :initform nil)
+   (params     :initarg :params   :type (or string list)   :initform nil)
+   (headers    :initarg :headers  :type list               :initform nil)
+   (data       :initarg :data     :type (or function string list) :initform nil)
+   (datas      :initform nil      :type (or string null))
+   (binaryp    :initform nil      :type boolean)
+   (resp       :initarg :resp     :type (or function null) :initform nil)
+   (timeout    :initarg :timeout  :type (or number null)   :initform nil)
+   (retry      :initarg :retry    :type (or number null)   :initform nil)
+   (filter     :initarg :filter   :type (or function null) :initform nil)
+   (done       :initarg :done     :type (or function null) :initform nil)
+   (fail       :initarg :fail     :type (or function null) :initform nil)
+   (fine       :initarg :fine     :type (or function null) :initform nil)
+   (sync       :initarg :sync)
+   (buffer     :initarg :buffer :initform nil)
+   (backend    :initarg :backend)
+   (cookie-jar :initarg :cookie-jar :type (or pdd-cookie-jar function null) :initform nil))
   "Abstract base class for HTTP request configs.")
 
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
@@ -425,6 +640,27 @@ you fully understand their interdependencies.")
            else if (cdr item)
            collect (funcall stringfy item)))))
 
+(cl-defmethod pdd-transform-req-cookies ((request pdd-request))
+  "Add cookies from cookie jar to REQUEST headers."
+  (with-slots (headers url cookie-jar) request
+    (let ((jar (or cookie-jar pdd-default-cookie-jar)))
+      (when (functionp jar)
+        (setq jar (pdd-funcall jar (list request))))
+      (when (setf cookie-jar jar)
+        (let* ((url-obj (url-generic-parse-url url))
+               (domain (url-host url-obj))
+               (path (url-filename url-obj))
+               (secure (equal "https" (url-type url-obj))))
+          (if (zerop (length path)) (setq path "/"))
+          (when-let* ((cookies (pdd-cookie-jar-get cookie-jar domain path secure)))
+            (pdd-log 'cookies "%s" cookies)
+            (push (cons "Cookie"
+                        (mapconcat
+                         (lambda (c)
+                           (format "%s=%s" (plist-get c :name) (plist-get c :value)))
+                         cookies "; "))
+                  headers)))))))
+
 (cl-defmethod pdd-transform-req-data ((request pdd-request))
   "Serialize data to raw string for REQUEST."
   (with-slots (headers data datas binaryp) request
@@ -505,6 +741,17 @@ you fully understand their interdependencies.")
                           (point) (progn (skip-chars-forward "0-9.") (point))))
   (setq pdd-resp-status (read (current-buffer)))
   (setq pdd-resp-headers (pdd-extract-http-headers)))
+
+(cl-defmethod pdd-transform-resp-cookies ()
+  "Save cookies from response to cookie jar for REQUEST."
+  (with-slots (cookie-jar url) pdd-current-request
+    (when (and cookie-jar pdd-resp-headers)
+      (cl-loop with domain = (or (url-host (url-generic-parse-url url)) "")
+               for (k . v) in pdd-resp-headers
+               if (eq k 'set-cookie) do
+               (when-let* ((cookie (pdd-parse-set-cookie v t)))
+                 (pdd-cookie-jar-put cookie-jar (or (plist-get cookie :domain) domain) cookie)))
+      (pdd-cookie-jar-clear cookie-jar))))
 
 (cl-defmethod pdd-transform-resp-decode ()
   "Decoding buffer automatically."
@@ -687,7 +934,7 @@ Examples:
                                (pdd-log tag "before done")
                                (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
                            (unless sync (kill-buffer data-buffer))))))
-           (proc-buffer (url-retrieve url callback nil t))
+           (proc-buffer (url-retrieve url callback nil t t))
            (process (get-buffer-process proc-buffer)))
       ;; log
       (pdd-log tag

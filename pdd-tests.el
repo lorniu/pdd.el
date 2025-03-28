@@ -77,14 +77,15 @@
               ,(unless (or (memq backend forbidens)
                            (memq sync forbidens)
                            (memq (intern (format "%s%s" backend sync)) forbidens))
-                 `(let ((pdd-default-sync ,sync))
-                    ,@(mapcar (lambda (expr)
-                                (let ((sd (if (memq (car expr) '(let let*)) (caddr expr) expr)))
-                                  (setq sd (walk-inject sd backend sync))
-                                  (setq sd `(should (let (it) ,(cadr sd) ,@(cddr sd))))
-                                  (if (eq (car expr) 'should) sd
-                                    `(,(car expr) ,(cadr expr) ,sd))))
-                              body)))))))
+                 `(let* ,@(let* ((letv (when (memq (caar body) '(let let*)) (cadar body)))
+                                 (bodyv (if letv (nthcdr 2 (car body)) body)))
+                            `(((pdd-default-sync ,sync) ,@letv)
+                              ,@(mapcar (lambda (expr)
+                                          (setq expr (walk-inject expr backend sync))
+                                          (when (eq (car expr) 'should)
+                                            (setq expr `(,(pop expr) (let (it) ,(pop expr) ,@expr))))
+                                          expr)
+                                        bodyv)))))))))
     `(progn ,@(cl-loop for c in pdd-test-backends
                        collect (deftest c :sync)
                        collect (deftest c :async)))))
@@ -119,6 +120,16 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
                    (unwind-protect
                        (pdd-format-formdata `(("name" . "John") ("age" . "30") (file ,temp-file)))
                      (delete-file temp-file))))))
+
+(ert-deftest pdd-test-parse-set-cookie ()
+  (should (equal (pdd-parse-set-cookie
+                  "__session-Id=38afes7a8; SameSite=None; Secure; Path=/; Partitioned;")
+                 '(:name "__session-Id" :value "38afes7a8" :samesite "none" :secure t :path "/" :partitioned t :host-only t)))
+  (should (equal (cl-loop for (k v) on
+                          (pdd-parse-set-cookie
+                           "id=a3fWa; Expires=Wed, 21 Oct 2015 07:28:00 GMT;  max-Age=2592000;Secure; Path=/; Domain=example.com")
+                          by #'cddr unless (eq k :created-at) append (list k v))
+                 '(:name "id" :value "a3fWa" :expires (22055 16000) :max-age 2592000 :secure t :path "/" :domain "example.com"))))
 
 
 ;;; Request Tests
@@ -297,6 +308,14 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
           (string-suffix-p "/get" (alist-get 'url it)))
   (should (pdd "/redirect/1" :done (lambda (r) (setq it r)))
           (string-suffix-p "/get" (alist-get 'url it))))
+
+(pdd-deftests cookies ()
+  (let ((cj (pdd-cookie-jar)))
+    (should (pdd "https://postman-echo.com/get" :cookie-jar cj)
+            (equal "sails.sid" (plist-get (cadar (oref cj cookies)) :name)))
+    (pdd-cookie-jar-put cj "postman-echo.com" '(:name "hello" :value "666"))
+    (should (pdd "https://postman-echo.com/get" :cookie-jar cj :done (lambda (r) (setq it r)))
+            (string-match-p "hello=666" (alist-get 'cookie (alist-get 'headers it))))))
 
 (provide 'pdd-tests)
 
