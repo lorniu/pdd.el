@@ -282,16 +282,19 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
                (equal (alist-get 'authenticated it) t))))
 
 (pdd-deftests timeout-and-retry ()
-  (let ((retry-count 0))
+  (let ((retry-count 0) finished)
     (should (pdd "/delay/2"
               :timeout 1 :retry 0
               :fail (lambda (r c) (setq it (format "%s%s" r c))))
             (string-match-p "408\\|timeout" it))
-    (should (pdd "/delay/2"
-              :timeout 1 :retry 2
-              :fail (lambda (r c) (cl-incf retry-count) (setq it (cons r c))))
+    (should (pdd "/delay/3"
+              :init (lambda () (cl-incf retry-count))
+              :timeout 2 :retry 2
+              :fail (lambda (r c) (setq it (cons r c)))
+              :fine (lambda () (setq finished t)))
+            (while (not finished) (sleep-for 0.2))
             (and (string-match-p "timeout\\|408" (format "%s" it))
-                 (= retry-count 2)))))
+                 (= retry-count 3)))))
 
 (pdd-deftests http-error-404 ()
   (should (pdd "/status/404" :fail (lambda (e c) (setq it (cons e c))))
@@ -301,13 +304,20 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
   (should (pdd "/status/500" :fail (lambda (e c) (setq it (cons e c))))
           (equal it (cons "Internal server error" 500))))
 
-;; Inhibit this test at present
-;; FIXME: there is response parse bug in plz, patch is needed later?
-(pdd-deftests redirect (plz url)
-  (should (pdd "/redirect-to?url=/get" :done (lambda (r) (setq it r)))
-          (string-suffix-p "/get" (alist-get 'url it)))
-  (should (pdd "/redirect/1" :done (lambda (r) (setq it r)))
-          (string-suffix-p "/get" (alist-get 'url it))))
+;; There is a wrong return response header bug in plz
+(pdd-deftests redirect (plz)
+  (let (finished)
+    (should (pdd "/redirect-to?url=/get"
+              :done (lambda (r) (setq it r))
+              :fine (lambda () (setq finished t)))
+            (while (not finished) (sleep-for 0.2))
+            (string-suffix-p "/get" (alist-get 'url it)))
+    (should (pdd "/redirect/1"
+              :init (setq finished nil)
+              :done (lambda (r) (setq it r))
+              :fine (lambda () (setq finished t)))
+            (while (not finished) (sleep-for 0.2))
+            (string-suffix-p "/get" (alist-get 'url it)))))
 
 (pdd-deftests cookies ()
   (let ((cj (pdd-cookie-jar)))

@@ -82,8 +82,8 @@ But global default cookie-jar is not recommended, try dynamic binding:
 You can use a function instead of instance to dynamic dispatch different cookie-jars to different requests:
 
 ```emacs-lisp
-(setq jar-aaa (pdd-cookie-jar))
-(setq jar-bbb (pdd-cookie-jar))
+(defvar jar-aaa (pdd-cookie-jar))
+(defvar jar-bbb (pdd-cookie-jar))
 
 (setq pdd-default-cookie-jar
       (lambda (request)
