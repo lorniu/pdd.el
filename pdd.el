@@ -515,6 +515,7 @@ If JAR is nil, operates on the default cookie jar."
    (resp       :initarg :resp     :type (or function null) :initform nil)
    (timeout    :initarg :timeout  :type (or number null)   :initform nil)
    (retry      :initarg :retry    :type (or number null)   :initform nil)
+   (init       :initarg :init     :type (or function null) :initform nil)
    (filter     :initarg :filter   :type (or function null) :initform nil)
    (done       :initarg :done     :type (or function null) :initform nil)
    (fail       :initarg :fail     :type (or function null) :initform nil)
@@ -694,7 +695,7 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data binaryp timeout retry sync done fail filter buffer backend) request
+  (with-slots (url method params data timeout retry sync done buffer) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when params
@@ -798,6 +799,7 @@ If JAR is nil, operates on the default cookie jar."
                             headers
                             data
                             resp
+                            init
                             filter
                             done
                             fail
@@ -827,6 +829,8 @@ Keyword Arguments:
              * String - sent directly
              * Alist - converted to formdata or JSON based on Content-Type
              * File uploads: ((key filepath))
+  :INIT    - Function called before the request is fired by backend:
+             (lambda (&optional request))
   :FILTER  - Filter function called during data reception, signature:
              (lambda (&optional headers process request))
   :RESP    - Response transformer function for raw response data, signature:
@@ -866,6 +870,8 @@ Examples:
                               (car args)
                             (apply #'pdd-make-request backend args))))
              (pdd-log 'req "pdd:around...")
+             ;; User's :init callback is the final chance to change request
+             (with-slots (init) request (if init (pdd-funcall init (list request))))
              ;; derived to specified backend to deal with the real request
              (funcall #'cl-call-next-method backend :request request)))
   (declare (indent 1)))

@@ -206,6 +206,7 @@ Download file with progress bar display:
                             headers
                             data
                             resp
+                            init
                             filter
                             done
                             fail
@@ -235,6 +236,8 @@ Keyword Arguments:
              * String - sent directly
              * Alist - converted to formdata or JSON based on Content-Type
              * File uploads: ((key filepath))
+  :INIT    - Function called before the request is fired by backend:
+             (lambda (&optional request))
   :FILTER  - Filter function called during data reception, signature:
              (lambda (&optional headers process request))
   :RESP    - Response transformer function for raw response data, signature:
