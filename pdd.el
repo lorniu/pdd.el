@@ -719,9 +719,8 @@ If JAR is nil, operates on the default cookie jar."
 (defvar-local pdd-resp-headers nil)
 (defvar-local pdd-resp-status nil)
 (defvar-local pdd-resp-version nil)
-(defvar-local pdd-current-request nil)
 
-(cl-defmethod pdd-transform-resp-init ()
+(cl-defmethod pdd-transform-resp-init (_request)
   "The most first check, if no problems clean newlines and set `pdd-resp-mark'."
   (widen) ; in case that the buffer is narrowed
   (goto-char (point-min))
@@ -732,7 +731,7 @@ If JAR is nil, operates on the default cookie jar."
     (while (search-forward "\r" pdd-resp-mark :noerror)
       (replace-match ""))))
 
-(cl-defmethod pdd-transform-resp-headers ()
+(cl-defmethod pdd-transform-resp-headers (_request)
   "Extract status line and headers."
   (goto-char (point-min))
   (skip-chars-forward " \t\n")
@@ -742,9 +741,9 @@ If JAR is nil, operates on the default cookie jar."
   (setq pdd-resp-status (read (current-buffer)))
   (setq pdd-resp-headers (pdd-extract-http-headers)))
 
-(cl-defmethod pdd-transform-resp-cookies ()
+(cl-defmethod pdd-transform-resp-cookies (request)
   "Save cookies from response to cookie jar for REQUEST."
-  (with-slots (cookie-jar url) pdd-current-request
+  (with-slots (cookie-jar url) request
     (when (and cookie-jar pdd-resp-headers)
       (cl-loop with domain = (or (url-host (url-generic-parse-url url)) "")
                for (k . v) in pdd-resp-headers
@@ -753,7 +752,7 @@ If JAR is nil, operates on the default cookie jar."
                  (pdd-cookie-jar-put cookie-jar (or (plist-get cookie :domain) domain) cookie)))
       (pdd-cookie-jar-clear cookie-jar))))
 
-(cl-defmethod pdd-transform-resp-decode ()
+(cl-defmethod pdd-transform-resp-decode (_request)
   "Decoding buffer automatically."
   (let* ((content-type (alist-get 'content-type pdd-resp-headers))
          (binaryp (pdd-binary-type-p content-type))
@@ -762,9 +761,9 @@ If JAR is nil, operates on the default cookie jar."
     (when charset
       (decode-coding-region pdd-resp-mark (point-max) charset))))
 
-(cl-defmethod pdd-transform-resp-body ()
-  "Convert response body as `pdd-resp-body'."
-  (with-slots (resp url) pdd-current-request
+(cl-defmethod pdd-transform-resp-body (request)
+  "Convert response body as `pdd-resp-body' for REQUEST."
+  (with-slots (resp url) request
     (setq pdd-resp-body
           (buffer-substring pdd-resp-mark (point-max)))
     (cond
@@ -780,14 +779,18 @@ If JAR is nil, operates on the default cookie jar."
   (if pdd-abort-flag
       (pdd-log 'resp "skip (aborted).")
     (with-slots (backend) request
-      (setq pdd-current-request request)
       (cl-loop for transformer in pdd-response-transformers
-             do (pdd-log 'resp (help-fns-function-name transformer))
-             do (funcall transformer))
+               do (pdd-log 'resp (help-fns-function-name transformer))
+               do (funcall transformer request))
       (list pdd-resp-body pdd-resp-headers
             pdd-resp-status pdd-resp-version request))))
 
 ;; Entrance
+
+(cl-defgeneric pdd-make-request (backend &rest _arg)
+  "Instance request object for BACKEND."
+  (:method ((backend pdd-backend) &rest args)
+           (apply #'pdd-request `(:backend ,backend :url ,@args))))
 
 (cl-defgeneric pdd (backend url &rest _args &key
                             method
@@ -861,7 +864,7 @@ Examples:
   (:method :around ((backend pdd-backend) &rest args)
            (let ((request (if (cl-typep (car args) 'pdd-request)
                               (car args)
-                            (apply #'pdd-request `(:backend ,backend :url ,@args)))))
+                            (apply #'pdd-make-request backend args))))
              (pdd-log 'req "pdd:around...")
              ;; derived to specified backend to deal with the real request
              (funcall #'cl-call-next-method backend :request request)))
