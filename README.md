@@ -1,6 +1,6 @@
 # HTTP Library for Emacs
 
-A versatile HTTP client library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
+A versatile HTTP library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
 
  - Choose between built-in `url.el` or high-performance `curl` backends. It gracefully falls back to `url.el` when `curl` is unavailable without requiring code changes.
  - Rich feature set including multipart uploads, streaming support, cookie-jar support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.

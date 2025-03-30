@@ -25,8 +25,8 @@
 
 ;;; Commentary:
 ;;
-;; A versatile HTTP client library that provides a unified interface making
-;; http requests across multiple backend implementations easily. It is designed
+;; A versatile HTTP library that provides a unified interface making http
+;; requests across multiple backend implementations easily. It is designed
 ;; for simplicity, flexibility and cross-platform compatibility.
 ;;
 ;;  - Choose between built-in `url.el' or high-performance `curl' backends. It
@@ -412,6 +412,7 @@ you fully understand their interdependencies.")
 
 (cl-defgeneric pdd-cookie-jar-put (jar domain cookie-list)
   "Add one or multiple cookies from COOKIE-LIST to the JAR for specified DOMAIN."
+  (declare (indent 2))
   (:method ((jar pdd-cookie-jar) domain cookie-list)
            (with-slots (cookies) jar
              (dolist (cookie (if (plist-get cookie-list :name) (list cookie-list) cookie-list))
@@ -685,7 +686,7 @@ If JAR is nil, operates on the default cookie jar."
                        (pdd-format-params data)))))))))
 
 (cl-defmethod pdd-transform-req-finally ((request pdd-request))
-  "Other change should be made for REQUEST."
+  "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
       (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
@@ -1078,10 +1079,10 @@ Or switch http backend to `pdd-url-backend' instead:\n
       ;; log
       (pdd-log tag
         "%s"          url
-        "HEADER: %s"  headers
+        "HEADER: %S"  headers
         "DATA: %s"    datas
         "BINARY: %s"  binaryp
-        "EXTRA: %s"   plz-curl-default-args)
+        "EXTRA: %S"   plz-curl-default-args)
       ;; sync
       (if sync
           (condition-case err
@@ -1125,23 +1126,27 @@ Or switch http backend to `pdd-url-backend' instead:\n
   (if (and (require 'plz nil t) (executable-find plz-curl-program))
       (pdd-plz-backend)
     (pdd-url-backend))
-  "Backend used by `pdd' by default.
-This should be instance of symbol `pdd-backend', or a function with current
-url or url+method as arguments that return an instance.  If is a function,
-the backend be used will be determined dynamically when the `pdd' be called.")
+  "Default backend used by `pdd' for HTTP requests.
+
+The value can be either:
+- A instance of function `pdd-backend', or
+- A function that returns such a instance.
+
+When the value is a function, it will be called with:
+- Either just the URL (string), or
+- Both URL and HTTP method (symbol)
+
+The function will be evaluated dynamically each time `pdd' is invoked,
+allowing for runtime backend selection based on request parameters.")
 
 (defun pdd-ensure-default-backend (args)
   "Pursue the value of variable `pdd-default-backend' if it is a function.
 ARGS should be the arguments of function `pdd'."
   (if (functionp pdd-default-backend)
-      (pcase (car (func-arity pdd-default-backend))
-        (1 (funcall pdd-default-backend (car args)))
-        (2 (funcall pdd-default-backend (car args)
-                    (intern-soft
-                     (or (plist-get (cdr args) :method)
-                         (if (plist-get (cdr args) :data) 'post 'get)))))
-        (_ (user-error "If `pdd-default-backend' is a function, it can only have
-one argument (url) or two arguments (url method)")))
+      (pdd-funcall pdd-default-backend
+        (list (car args) (intern-soft
+                          (or (plist-get (cdr args) :method)
+                              (if (plist-get (cdr args) :data) 'post 'get)))))
     pdd-default-backend))
 
 (defun pdd-complete-absent-keywords (&rest args)
@@ -1165,9 +1170,13 @@ one argument (url) or two arguments (url method)")))
 
 ;;;###autoload
 (cl-defmethod pdd (&rest args)
-  "Send a request with `pdd-default-backend'.
-In this case, the first argument in ARGS should be url instead of backend.
-See the generic method for other ARGS and details."
+  "Send an HTTP request using the `pdd-default-backend'.
+
+This is a convenience method that uses the default backend instead of
+requiring one to be specified explicitly.
+
+ARGS should be a plist where the first argument is the URL (string).
+Other supported arguments are the same as the generic `pdd' method."
   (let* ((args (apply #'pdd-complete-absent-keywords args))
          (backend (pdd-ensure-default-backend args)))
     (unless (and backend (eieio-object-p backend) (object-of-class-p backend 'pdd-backend))

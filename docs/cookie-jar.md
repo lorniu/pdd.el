@@ -82,8 +82,8 @@ But global default cookie-jar is not recommended, try dynamic binding:
 You can use a function instead of instance to dynamic dispatch different cookie-jars to different requests:
 
 ```emacs-lisp
-(setq jar-aaa (pdd-cookie-jar))
-(setq jar-bbb (pdd-cookie-jar))
+(defvar jar-aaa (pdd-cookie-jar))
+(defvar jar-bbb (pdd-cookie-jar))
 
 (setq pdd-default-cookie-jar
       (lambda (request)
@@ -105,10 +105,14 @@ The management of Cookies is automatic. If you need Cookies support, just bind a
 ```emacs-lisp
 ;; add new cookie (with RFC 6265 format)
 (pdd-cookie-jar-put jar "example.com"
-  '(:name "session_id"
-    :value "abc123"
-    :path "/"
-    :expires ,(time-add (current-time) (days-to-time 30))
+  (list :name "session_id"
+        :value "abc123"
+        :path "/"
+        :expires (time-add (current-time) (days-to-time 30))))
+
+;; add new cookies from browser's cookie string
+(pdd-cookie-jar-put jar "example.com"
+  (pdd-parse-request-cookies "aaa=3;bbb=4"))
 
 ;; query cookie
 (let ((cookies (pdd-cookie-jar-get jar "example.com" "/api" t)))
