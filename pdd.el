@@ -1106,7 +1106,7 @@ Examples:
 
 ;;; Implement for plz.el
 
-(defclass pdd-plz-backend (pdd-backend)
+(defclass pdd-curl-backend (pdd-backend)
   ((extra-args
     :initarg :args
     :type list
@@ -1132,12 +1132,12 @@ Examples:
 Or switch http backend to `pdd-url-backend' instead:\n
   (setq pdd-default-backend (pdd-url-backend))")
 
-(cl-defmethod pdd :before ((_ pdd-plz-backend) &rest _)
+(cl-defmethod pdd :before ((_ pdd-curl-backend) &rest _)
   "Check if `plz.el' is available."
   (unless (and (require 'plz nil t) (executable-find plz-curl-program))
-    (error "You should have `plz.el' and `curl' installed before using `pdd-plz-backend'")))
+    (error "You should have `plz.el' and `curl' installed before using `pdd-curl-backend'")))
 
-(cl-defmethod pdd-proxy-vars ((_ pdd-plz-backend) (request pdd-request))
+(cl-defmethod pdd-proxy-vars ((_ pdd-curl-backend) (request pdd-request))
   "Return proxy configs for plz REQUEST."
   (with-slots (proxy) request
     (when proxy
@@ -1146,7 +1146,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
           ,@(when (and user pass)
               `("--proxy-user" ,(format "%s:%s" user pass))))))))
 
-(cl-defmethod pdd-transform-error ((_ pdd-plz-backend) error)
+(cl-defmethod pdd-transform-error ((_ pdd-curl-backend) error)
   "Hacky, but try to unify the ERROR data format with url.el."
   (when (and (consp error) (memq (car error) '(plz-http-error plz-curl-error)))
     (setq error (caddr error)))
@@ -1164,7 +1164,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
             (list 'error (pdd-http-code-text code) code)
           error)))))
 
-(cl-defmethod pdd ((backend pdd-plz-backend) &key request)
+(cl-defmethod pdd ((backend pdd-curl-backend) &key request)
   "Send REQUEST with plz as BACKEND."
   (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
     (let* ((tag (eieio-object-class backend))
@@ -1237,7 +1237,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
 
 (defvar pdd-default-backend
   (if (and (require 'plz nil t) (executable-find plz-curl-program))
-      (pdd-plz-backend)
+      (pdd-curl-backend)
     (pdd-url-backend))
   "Default backend used by `pdd' for HTTP requests.
 

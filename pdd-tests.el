@@ -35,7 +35,7 @@
 (require 'pdd)
 (require 'plz)
 
-(defconst pdd-test-backends '(url plz))
+(defconst pdd-test-backends '(url curl))
 
 (defvar pdd-test-host "https://httpbin.org")
 
@@ -44,7 +44,7 @@
 ;;(setq pdd-default-sync :async)
 ;;(setq pdd-base-url pdd-test-host)
 ;;(setq pdd-default-backend (pdd-url-backend))
-;;(setq pdd-default-backend (pdd-plz-backend))
+;;(setq pdd-default-backend (pdd-curl-backend))
 
 (defun pdd-block-and-wait-proc (proc)
   (cl-loop while (ignore-errors (buffer-live-p (process-buffer proc)))
@@ -58,7 +58,7 @@
      (pdd ,@args)))
 
 (cl-defmacro pdd-deftests (name (&rest forbidens) &rest body)
-  "Build test functions, cover all the cases by composing url/plz and sync/aync."
+  "Build test functions, cover all the cases by composing url/curl and sync/aync."
   (declare (indent 2))
   (cl-labels
       ((walk-inject (expr backend sync)
@@ -136,7 +136,7 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
 
 (ert-deftest pdd-test-basic-request ()
   (should (eq 'user-agent (caar (pdd-test-req url "/user-agent"))))
-  (should (eq 'user-agent (caar (pdd-test-req plz "/user-agent")))))
+  (should (eq 'user-agent (caar (pdd-test-req curl "/user-agent")))))
 
 (pdd-deftests params ()
   (should (pdd "/get"
@@ -214,7 +214,7 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
           (equal (alist-get 'k (alist-get 'form it)) "v")))
 
 ;; There is problem with plz's patch
-(pdd-deftests method-patch (plz)
+(pdd-deftests method-patch (curl)
   (should (pdd "/patch"
             :method 'patch
             :data '((k . v))
@@ -305,7 +305,7 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
           (equal it (cons "Internal server error" 500))))
 
 ;; There is a wrong return response header bug in plz
-(pdd-deftests redirect (plz)
+(pdd-deftests redirect (curl)
   (let (finished)
     (should (pdd "/redirect-to?url=/get"
               :done (lambda (r) (setq it r))

@@ -33,22 +33,22 @@ Just request through `pdd`, with or without specifying an http backend:
 ;; If request with no http backend specified, the request will be sent
 ;; through backend specified by `pdd-default-backend'.
 
-;; You can config it. If not, it will use `(pdd-plz-backend)` if possible,
+;; You can config it. If not, it will use `(pdd-curl-backend)` if possible,
 ;; then fallback to `(pdd-url-backend)` if `plz` is unavailable.
 (setq pdd-default-backend (pdd-url-backend))
 (setq pdd-default-backend (pdd-url-backend :proxy "https://localhost:1088"))
-(setq pdd-default-backend (pdd-plz-backend :proxy "socks5://127.0.0.1:1080"))
+(setq pdd-default-backend (pdd-curl-backend :proxy "socks5://127.0.0.1:1080"))
 
 ;; Use a function to dynamically determine which backend to use for a request
 ;; The function can have one argument (url), or two arguments (url method)
 (setq pdd-default-backend
       (lambda (url)
         (if (string-match-p "deepl.com/" url)
-            (pdd-plz-backend :proxy "socks5://127.0.0.1:1080")
-          (pdd-plz-backend))))
+            (pdd-curl-backend :proxy "socks5://127.0.0.1:1080")
+          (pdd-curl-backend))))
 (setq pdd-default-backend
       (lambda (_ method)
-        (if (eq method 'patch) (pdd-url-backend) (pdd-plz-backend))))
+        (if (eq method 'patch) (pdd-url-backend) (pdd-curl-backend))))
 ```
 
 And try to send requests like this:
