@@ -3,12 +3,13 @@
 A versatile HTTP library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
 
  - Choose between built-in `url.el` or high-performance `curl` backends. It gracefully falls back to `url.el` when `curl` is unavailable without requiring code changes.
- - Rich feature set including multipart uploads, streaming support, cookie-jar support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
+ - Rich feature set including multipart uploads, streaming support, cookie-jar support, proxy support, intercepters support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
  - Minimalist yet intuitive API that works consistently across backends. Features like variadic callbacks and header abbreviation rules help you accomplish more with less code.
  - Extensible architecture makes it easy to add new backends.
 
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
+- [How to use proxy](docs/proxy.md)
 - [How to manage cookies](docs/cookie-jar.md)
 - [Compare with plz.el](#Comparison)
 
@@ -35,16 +36,15 @@ Just request through `pdd`, with or without specifying an http backend:
 ;; You can config it. If not, it will use `(pdd-plz-backend)` if possible,
 ;; then fallback to `(pdd-url-backend)` if `plz` is unavailable.
 (setq pdd-default-backend (pdd-url-backend))
-(setq pdd-default-backend (pdd-plz-backend :args '("--proxy" "socks5://127.0.0.1:1080")))
-(setq pdd-default-backend (pdd-url-backend :proxies '(("http"  . "host:9999")
-                                                      ("https" . "host:9999"))))
+(setq pdd-default-backend (pdd-url-backend :proxy "https://localhost:1088"))
+(setq pdd-default-backend (pdd-plz-backend :proxy "socks5://127.0.0.1:1080"))
 
 ;; Use a function to dynamically determine which backend to use for a request
 ;; The function can have one argument (url), or two arguments (url method)
 (setq pdd-default-backend
       (lambda (url)
         (if (string-match-p "deepl.com/" url)
-            (pdd-plz-backend :args '("--proxy" "socks5://127.0.0.1:1080"))
+            (pdd-plz-backend :proxy "socks5://127.0.0.1:1080")
           (pdd-plz-backend))))
 (setq pdd-default-backend
       (lambda (_ method)
@@ -267,6 +267,7 @@ Returns:
 | **Type Conversion**       | ✅ Auto conversion               | ❌️ Manual convert       |
 | **Retry Logic**           | ✅ Configurable                  | ❌ None                 |
 | **Req/Resp Interceptors** | ✅ Support                       | ❌ None                 |
+| **Proxy support**         | ✅ Dynamic and easy              | ⚠️ Manual               |
 | **Auto Cookies manage**   | ✅ Support with cookie-jar       | ❌ No                   |
 | **Header Abbreviations**  | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
 | **Variadic Callbacks**    | ✅ Yes, make code cleaner        | ❌ No                   |

@@ -33,8 +33,9 @@
 ;;    gracefully falls back to `url.el' when `curl' is unavailable without
 ;;    requiring code changes.
 ;;  - Rich feature set including multipart uploads, streaming support,
-;;    cookie-jar support, automatic retry strategies, and smart data conversion.
-;;    Enhances `url.el' to support all these capabilities and works well enough.
+;;    cookie-jar support, intercepters support, automatic retry strategies,
+;;    and smart data conversion. Enhances `url.el' to support all these
+;;    capabilities and works well enough.
 ;;  - Minimalist yet intuitive API that works consistently across backends.
 ;;    Features like variadic callbacks and header abbreviation rules help
 ;;    you accomplish more with less code.
@@ -53,6 +54,7 @@
 
 (require 'cl-lib)
 (require 'url-http)
+(require 'socks)
 (require 'eieio)
 (require 'json)
 (require 'help)
@@ -102,6 +104,9 @@ Usage Examples:
 
 They are be replaced when transforming request.")
 
+(defvar socks-server)
+(defvar socks-username)
+(defvar socks-password)
 (defvar url-http-codes)
 
 (defun pdd-log (tag &rest args)
@@ -217,6 +222,29 @@ Try to unhex the second part when URL-DECODE is not nil."
               (funcall (if url-decode #'url-unhex-string #'identity)
                        (string-trim v))))))
 
+(defun pdd-parse-proxy-url (proxy-url)
+  "Parse PROXY-URL into a plist with :type, :host, :port, :user, :pass.
+
+Supports formats like:
+  http://localhost
+  https://example.com:8080
+  socks5://user:pass@127.0.0.1:1080"
+  (cl-assert (stringp proxy-url))
+  (let* ((url (url-generic-parse-url proxy-url))
+         (type (intern (url-type url)))
+         (host (url-host url))
+         (port (or (url-port url)
+                   (pcase type
+                     ('http 80)
+                     ('https 443)
+                     ('socks5 1080)
+                     (_ 8080))))
+         (user (url-user url))
+         (pass (url-password url)))
+    `( :type ,type :host ,host :port ,port
+       ,@(when user `(:user ,user))
+       ,@(when pass `(:pass ,pass)))))
+
 (defun pdd-parse-set-cookie (cookie-string &optional url-decode)
   "Parse HTTP Set-Cookie COOKIE-STRING with optional URL-DECODE.
 
@@ -312,8 +340,8 @@ When the value is a function, it may accept either:
 This variable is used as a fallback when no cookie jar is explicitly
 provided in individual requests.")
 
-(defvar-local pdd-abort-flag nil
-  "Non-nil means to ignore following request progress.")
+(defvar pdd-default-proxy nil
+  "Default proxy used by the request.")
 
 (defvar pdd-request-transformers
   '(pdd-transform-req-done
@@ -322,6 +350,7 @@ provided in individual requests.")
     pdd-transform-req-headers
     pdd-transform-req-cookies
     pdd-transform-req-data
+    pdd-transform-req-proxy
     pdd-transform-req-finally)
   "List of functions that transform the request object in sequence.
 
@@ -352,11 +381,20 @@ stages.  While you may safely append additional transformers to extend
 functionality, you should not remove or reorder the built-in transformers unless
 you fully understand their interdependencies.")
 
+(defvar-local pdd-abort-flag nil
+  "Non-nil means to ignore following request progress.")
+
 ;; Backend
 
 (defclass pdd-backend ()
   ((insts :allocation :class :initform nil)
-   (user-agent :initarg :user-agent :initform nil :type (or string null)))
+   (user-agent :initarg :user-agent
+               :initform nil
+               :type (or string null))
+   (proxy :initarg :proxy
+          :type (or string function null)
+          :initform nil
+          :documentation "URL in format proto://[user:pass@]host:port or a function return one."))
   "Used to send http request."
   :abstract t)
 
@@ -503,6 +541,11 @@ If JAR is nil, operates on the default cookie jar."
           (pdd-cookie-jar-persist jar)
         (pdd-cookie-jar-load jar)))))
 
+;; Proxy
+
+(cl-defgeneric pdd-proxy-vars (backend request)
+  "Return proxy configs for REQUEST using BACKEND.")
+
 ;; Request
 
 (defclass pdd-request ()
@@ -522,9 +565,10 @@ If JAR is nil, operates on the default cookie jar."
    (fail       :initarg :fail     :type (or function null) :initform nil)
    (fine       :initarg :fine     :type (or function null) :initform nil)
    (sync       :initarg :sync)
-   (buffer     :initarg :buffer :initform nil)
+   (buffer     :initarg :buffer   :initform nil)
    (backend    :initarg :backend)
-   (cookie-jar :initarg :cookie-jar :type (or pdd-cookie-jar function null) :initform nil))
+   (cookie-jar :initarg :cookie-jar :type (or pdd-cookie-jar function null) :initform nil)
+   (proxy      :initarg :proxy    :type (or string list null) :initform nil))
   "Abstract base class for HTTP request configs.")
 
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
@@ -685,6 +729,33 @@ If JAR is nil, operates on the default cookie jar."
                                         "application/x-www-form-urlencoded"))
                        (pdd-format-params data)))))))))
 
+(cl-defmethod pdd-transform-req-proxy ((request pdd-request))
+  "Parse proxy setting for current REQUEST."
+  (let* ((backend (oref request backend))
+         (proxy (or (oref request proxy) (oref backend proxy) pdd-default-proxy)))
+    (when (functionp proxy)
+      (setq proxy (pdd-funcall proxy (list request))))
+    (when (stringp proxy)
+      (condition-case nil
+          (setq proxy (pdd-parse-proxy-url proxy))
+        (error (user-error "Make sure proxy url is correct: %s" proxy))))
+    (when proxy
+      (unless (and (plist-get proxy :type) (plist-get proxy :host) (plist-get proxy :port))
+        (user-error "Invalid proxy found"))
+      (when (and (plist-get proxy :user)
+                 (not (plist-get proxy :pass)))
+        (require 'auth-source-pass)
+        (let* ((host (plist-get proxy :host))
+               (user (plist-get proxy :user))
+               (port (plist-get proxy :port))
+               (auths (or (auth-source-search :host host :user user :port port)
+                          (auth-source-search :host host :user user)))
+               (pass (plist-get 'secure (car auths))))
+          (when (functionp pass)
+            (setq pass (funcall pass)))
+          (if pass (plist-put proxy :pass pass))))
+      (oset request proxy proxy))))
+
 (cl-defmethod pdd-transform-req-finally ((request pdd-request))
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
@@ -714,6 +785,11 @@ If JAR is nil, operates on the default cookie jar."
              do (pdd-log 'req (help-fns-function-name transformer))
              do (funcall transformer request))))
 
+(cl-defgeneric pdd-make-request (backend &rest _arg)
+  "Instance request object for BACKEND."
+  (:method ((backend pdd-backend) &rest args)
+           (apply #'pdd-request `(:backend ,backend :url ,@args))))
+
 ;; Response
 
 (defvar-local pdd-resp-mark nil)
@@ -741,7 +817,10 @@ If JAR is nil, operates on the default cookie jar."
   (setq pdd-resp-version (buffer-substring
                           (point) (progn (skip-chars-forward "0-9.") (point))))
   (setq pdd-resp-status (read (current-buffer)))
-  (setq pdd-resp-headers (pdd-extract-http-headers)))
+  (setq pdd-resp-headers (pdd-extract-http-headers))
+  (unless (and pdd-resp-version pdd-resp-status pdd-resp-headers)
+    (pdd-log 'resp-error "%s" (buffer-string))
+    (user-error "Maybe something wrong with the response content")))
 
 (cl-defmethod pdd-transform-resp-cookies (request)
   "Save cookies from response to cookie jar for REQUEST."
@@ -789,11 +868,6 @@ If JAR is nil, operates on the default cookie jar."
 
 ;; Entrance
 
-(cl-defgeneric pdd-make-request (backend &rest _arg)
-  "Instance request object for BACKEND."
-  (:method ((backend pdd-backend) &rest args)
-           (apply #'pdd-request `(:backend ,backend :url ,@args))))
-
 (cl-defgeneric pdd (backend url &rest _args &key
                             method
                             params
@@ -808,6 +882,7 @@ If JAR is nil, operates on the default cookie jar."
                             sync
                             timeout
                             retry
+                            proxy
                             &allow-other-keys)
   "Send HTTP request using the specified BACKEND.
 
@@ -845,6 +920,7 @@ Keyword Arguments:
   :SYNC    - Whether to execute synchronously (boolean)
   :TIMEOUT - Timeout in seconds
   :RETRY   - Number of retry attempts on timeout
+  :PROXY   - Proxy used by this request
 
 Returns:
   Response data in sync mode, process object in async mode.
@@ -880,12 +956,7 @@ Examples:
 
 ;;; Implement for url.el
 
-(defclass pdd-url-backend (pdd-backend)
-  ((proxy-services
-    :initarg :proxies
-    :initform nil
-    :type (or list null)
-    :documentation "Proxy services passed to `url.el', see `url-proxy-services' for details."))
+(defclass pdd-url-backend (pdd-backend) ()
   :documentation "Http Backend implemented using `url.el'.")
 
 (defvar url-http-content-type)
@@ -895,6 +966,27 @@ Examples:
 (defvar url-http-response-version)
 
 (defvar pdd-url-extra-filter nil)
+
+(cl-defmethod pdd-proxy-vars ((_ pdd-url-backend) (request pdd-request))
+  "Serialize proxy config for url REQUEST."
+  (with-slots (proxy) request
+    (when proxy
+      (cl-destructuring-bind (&key type host port user pass) proxy
+        (if (string-prefix-p "sock" (symbol-name type))
+            ;; case of using socks proxy
+            (let ((version (substring (symbol-name type) 5)))
+              (cond
+               ((member version '("4" "5"))
+                (setq version (string-to-number version)))
+               ((equal version "4a")
+                (setq version '4a))
+               (t (user-error "Maybe invalid socket proxy setup")))
+              (list :server (list "Default server" host port version)
+                    :user user :pass pass))
+          ;; case of using http proxy, used by `url-proxy-locator'
+          (format "%s%s:%s"
+                  (if (and user pass) (format "%s:%s@" user pass) "")
+                  host port))))))
 
 (cl-defmethod pdd-transform-error ((_ pdd-url-backend) status)
   "Extract error object from callback STATUS."
@@ -923,80 +1015,93 @@ Examples:
 (cl-defmethod pdd ((backend pdd-url-backend) &key request)
   "Send REQUEST with url.el as BACKEND."
   (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
-    (let* ((tag (eieio-object-class backend))
-           (url-request-data datas)
-           (url-request-extra-headers headers)
-           (url-request-method (string-to-unibyte (upcase (format "%s" method))))
-           (url-mime-encoding-string "identity")
-           (url-proxy-services (or (oref backend proxy-services) url-proxy-services))
-           buffer-data data-buffer timer
-           (callback (lambda (status)
-                       (pdd-log tag "callback.")
-                       (ignore-errors (cancel-timer timer))
-                       (setq data-buffer (current-buffer))
-                       (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
-                       (if pdd-abort-flag
-                           (pdd-log tag "skip done (aborted).")
-                         (unwind-protect
-                             (if-let* ((err (pdd-transform-error backend status)))
-                                 (progn (pdd-log tag "before fail")
-                                        (funcall fail err))
-                               (pdd-log tag "before done")
-                               (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
-                           (unless sync (kill-buffer data-buffer))))))
-           (proc-buffer (url-retrieve url callback nil t t))
-           (process (get-buffer-process proc-buffer)))
-      ;; log
-      (pdd-log tag
-        "%s %s"             url-request-method url
-        "HEADER: %S"        url-request-extra-headers
-        "DATA: %s"          url-request-data
-        "BINARY: %s"        binaryp
-        "Proxy: %s"         url-proxy-services
-        "User Agent: %s"    url-user-agent
-        "MIME Encoding: %s" url-mime-encoding-string)
-      ;; Weird, but you have to bind `url-user-agent' like this to make it work
-      (setf (buffer-local-value 'url-user-agent proc-buffer)
-            (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
-              (oref backend user-agent) pdd-user-agent))
-      ;; :filter support via hook
-      (when (and filter (buffer-live-p proc-buffer))
-        (with-current-buffer proc-buffer
-          (setq-local pdd-url-extra-filter filter)
-          (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)))
-      ;; :timeout support via timer
-      (when (numberp timeout)
-        (let ((timer-callback
-               (lambda ()
-                 (pdd-log 'timer "kill timeout.")
-                 (unless data-buffer
-                   (ignore-errors (stop-process process))
-                   (ignore-errors
-                     (with-current-buffer proc-buffer
-                       (erase-buffer)
-                       (setq-local url-http-end-of-headers 30)
-                       (insert "HTTP/1.1 408 Operation timeout")))
-                   (ignore-errors (delete-process process))))))
-          (setq timer (run-with-timer timeout nil timer-callback))))
-      (if (and sync proc-buffer)
-          ;; copy from `url-retrieve-synchronously'
-          (catch 'pdd-done
-            (when-let* ((redirect-buffer (buffer-local-value 'url-redirect-buffer proc-buffer)))
-              (unless (eq redirect-buffer proc-buffer)
-                (let (kill-buffer-query-functions)
-                  (kill-buffer proc-buffer))
-                (setq proc-buffer redirect-buffer)))
-            (when-let* ((proc (get-buffer-process proc-buffer)))
-              (when (memq (process-status proc) '(closed exit signal failed))
-                (unless data-buffer
-		          (throw 'pdd-done 'exception))))
-            (with-local-quit
-              (while (and (process-live-p process)
-                          (not (buffer-local-value 'pdd-abort-flag proc-buffer))
-                          (not data-buffer))
-                (accept-process-output nil 0.05)))
-            buffer-data)
-        process))))
+    ;; setup proxy
+    (let* ((proxy (pdd-proxy-vars backend request))
+           (socks-server (if proxy nil socks-server))
+           (socks-username (if proxy nil socks-username))
+           (socks-password (if proxy nil socks-password))
+           (url-gateway-method (if proxy 'native url-gateway-method))
+           (url-proxy-locator (if proxy (lambda (&rest _) "DIRECT") url-proxy-locator)))
+      (cond ((consp proxy)
+             (setq url-gateway-method 'socks
+                   socks-server (plist-get proxy :server)
+                   socks-username (plist-get proxy :user)
+                   socks-password (plist-get proxy :pass)))
+            ((stringp proxy)
+             (setq url-proxy-locator (lambda (&rest _) (concat "PROXY " proxy)))))
+      ;; start url-retrive
+      (let* ((url-request-data datas)
+             (url-request-extra-headers headers)
+             (url-request-method (string-to-unibyte (upcase (format "%s" method))))
+             (url-mime-encoding-string "identity")
+             timer buffer-data data-buffer
+             (callback (lambda (status)
+                         (pdd-log 'url-backend "callback.")
+                         (ignore-errors (cancel-timer timer))
+                         (setq data-buffer (current-buffer))
+                         (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
+                         (if pdd-abort-flag
+                             (pdd-log 'url-backend "skip done (aborted).")
+                           (unwind-protect
+                               (if-let* ((err (pdd-transform-error backend status)))
+                                   (progn (pdd-log 'url-backend "before fail")
+                                          (funcall fail err))
+                                 (pdd-log 'url-backend "before done")
+                                 (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
+                             (unless sync (kill-buffer data-buffer))))))
+             (proc-buffer (url-retrieve url callback nil t t))
+             (process (get-buffer-process proc-buffer)))
+        ;; log
+        (pdd-log 'url-backend
+          "%s %s"             url-request-method url
+          "HEADER: %S"        url-request-extra-headers
+          "DATA: %s"          url-request-data
+          "BINARY: %s"        binaryp
+          "Proxy: %S"         proxy
+          "User Agent: %s"    url-user-agent
+          "MIME Encoding: %s" url-mime-encoding-string)
+        ;; Weird, but you have to bind `url-user-agent' like this to make it work
+        (setf (buffer-local-value 'url-user-agent proc-buffer)
+              (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
+                (oref backend user-agent) pdd-user-agent))
+        ;; :filter support via hook
+        (when (and filter (buffer-live-p proc-buffer))
+          (with-current-buffer proc-buffer
+            (setq-local pdd-url-extra-filter filter)
+            (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)))
+        ;; :timeout support via timer
+        (when (numberp timeout)
+          (let ((timer-callback
+                 (lambda ()
+                   (pdd-log 'timer "kill timeout.")
+                   (unless data-buffer
+                     (ignore-errors (stop-process process))
+                     (ignore-errors
+                       (with-current-buffer proc-buffer
+                         (erase-buffer)
+                         (setq-local url-http-end-of-headers 30)
+                         (insert "HTTP/1.1 408 Operation timeout")))
+                     (ignore-errors (delete-process process))))))
+            (setq timer (run-with-timer timeout nil timer-callback))))
+        (if (and sync proc-buffer)
+            ;; copy from `url-retrieve-synchronously'
+            (catch 'pdd-done
+              (when-let* ((redirect-buffer (buffer-local-value 'url-redirect-buffer proc-buffer)))
+                (unless (eq redirect-buffer proc-buffer)
+                  (let (kill-buffer-query-functions)
+                    (kill-buffer proc-buffer))
+                  (setq proc-buffer redirect-buffer)))
+              (when-let* ((proc (get-buffer-process proc-buffer)))
+                (when (memq (process-status proc) '(closed exit signal failed))
+                  (unless data-buffer
+		            (throw 'pdd-done 'exception))))
+              (with-local-quit
+                (while (and (process-live-p process)
+                            (not (buffer-local-value 'pdd-abort-flag proc-buffer))
+                            (not data-buffer))
+                  (accept-process-output nil 0.05)))
+              buffer-data)
+          process)))))
 
 
 ;;; Implement for plz.el
@@ -1032,6 +1137,15 @@ Or switch http backend to `pdd-url-backend' instead:\n
   (unless (and (require 'plz nil t) (executable-find plz-curl-program))
     (error "You should have `plz.el' and `curl' installed before using `pdd-plz-backend'")))
 
+(cl-defmethod pdd-proxy-vars ((_ pdd-plz-backend) (request pdd-request))
+  "Return proxy configs for plz REQUEST."
+  (with-slots (proxy) request
+    (when proxy
+      (cl-destructuring-bind (&key type host port user pass) proxy
+        `("--proxy" ,(format "%s://%s:%d" type host port)
+          ,@(when (and user pass)
+              `("--proxy-user" ,(format "%s:%s" user pass))))))))
+
 (cl-defmethod pdd-transform-error ((_ pdd-plz-backend) error)
   "Hacky, but try to unify the ERROR data format with url.el."
   (when (and (consp error) (memq (car error) '(plz-http-error plz-curl-error)))
@@ -1055,10 +1169,9 @@ Or switch http backend to `pdd-url-backend' instead:\n
   (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
     (let* ((tag (eieio-object-class backend))
            (abort-flag) ; used to catch abort action from :filter
+           (proxy (pdd-proxy-vars backend request))
            (plz-curl-default-args
-            (if (slot-boundp backend 'extra-args)
-                (append (oref backend extra-args) plz-curl-default-args)
-              plz-curl-default-args))
+            (if proxy (append proxy plz-curl-default-args) plz-curl-default-args))
            (filter-fn
             (when filter
               (lambda (proc string)
