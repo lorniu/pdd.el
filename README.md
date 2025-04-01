@@ -220,7 +220,7 @@ Download file with progress bar display:
 This is a generic function with implementations provided by backend classes.
 
 Parameters:
-  BACKEND  - HTTP backend instance (subclass of `pdd-backend')
+  BACKEND  - HTTP backend instance (subclass of `pdd-http-backend')
   URL      - Target URL (string)
 
 Keyword Arguments:

@@ -68,46 +68,8 @@
   "Debug flag."
   :type 'boolean)
 
-(defcustom pdd-user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36"
-  "Default user agent used by request."
-  :type 'string)
-
-(defcustom pdd-max-retry 1
-  "Default retry times when request timeout."
-  :type 'integer)
-
-(defconst pdd-multipart-boundary (format "pdd-boundary-%x%x=" (random) (random))
-  "A string used as multipart boundary.")
-
-(defvar pdd-header-rewrite-rules
-  '((ct          . ("Content-Type"  . "%s"))
-    (ct-bin      . ("Content-Type"  . "application/octet-stream"))
-    (json        . ("Content-Type"  . "application/json"))
-    (json-u8     . ("Content-Type"  . "application/json; charset=utf-8"))
-    (www-url     . ("Content-Type"  . "application/x-www-form-urlencoded"))
-    (www-url-u8  . ("Content-Type"  . "application/x-www-form-urlencoded; charset=utf-8"))
-    (acc-github  . ("Accept"        . "application/vnd.github+json"))
-    (basic       . ("Authorization" . "Basic %s"))
-    (bear        . ("Authorization" . "Bearer %s"))
-    (auth        . ("Authorization" . "%s %s"))
-    (keep-alive  . ("Connection"    . "Keep-Alive"))
-    (ua-emacs    . ("User-Agent"    . "Emacs Agent")))
-  "Header abbreviation system for simpfying request definitions.
-
-Template Placeholders:
-  %s - Replaced with provided arguments
-
-Usage Examples:
-  json → (\"Content-Type\" . \"application/json\")
-  (bear \"token\") → (\"Authorization\" . \"Bearer token\")
-  (auth \"Basic\" \"creds\") → (\"Authorization\" . \"Basic creds\")
-
-They are be replaced when transforming request.")
-
-(defvar socks-server)
-(defvar socks-username)
-(defvar socks-password)
-(defvar url-http-codes)
+(defvar pdd-debug-buffer nil
+  "Where to show the log message.")
 
 (defun pdd-log (tag &rest args)
   "Output log to *Messages* buffer using syntax of `message'.
@@ -117,14 +79,20 @@ rest arguments."
   (when pdd-debug
     (cl-loop with sub = nil
              with fmt = (format "[%s] " (or tag "pdd"))
-             with msg = (lambda (args)
-                          (setq args (nreverse args))
-                          (apply #'message (concat fmt (car args)) (cdr args)))
+             with display = (lambda (args)
+                              (setq args (nreverse args)
+                                    args (cons (concat fmt (car args)) (cdr args)))
+                              (if pdd-debug-buffer
+                                  (with-current-buffer (get-buffer-create pdd-debug-buffer)
+                                    (goto-char (point-max))
+                                    (princ (apply #'format args) (current-buffer))
+                                    (princ "\n" (current-buffer)))
+                                (apply #'message args)))
              for el in args
              if (and (stringp el) (cl-find ?% el))
-             do (progn (if sub (funcall msg sub)) (setq sub (list el)))
+             do (progn (if sub (funcall display sub)) (setq sub (list el)))
              else do (push el sub)
-             finally (funcall msg sub))))
+             finally (funcall display sub))))
 
 (defun pdd-detect-charset (content-type)
   "Detect charset from CONTENT-TYPE header."
@@ -159,6 +127,10 @@ rest arguments."
   (if-let* ((ps (if (consp params) (pdd-format-params params) params)))
       (concat url (unless (string-match-p "[?&]$" url) (if (string-match-p "\\?" url) "&" "?")) ps)
     url))
+
+(defconst pdd-multipart-boundary
+  (format "pdd-boundary-%x%x=" (random) (random))
+  "A string used as multipart boundary.")
 
 (defun pdd-format-formdata (alist)
   "Generate multipart/form-data payload from ALIST.
@@ -293,6 +265,8 @@ Return a plist containing all cookie attributes."
                           :value (string-trim (cadr key-value))))))
               pairs))))
 
+(defvar url-http-codes)
+
 (defun pdd-http-code-text (http-status-code)
   "Return text description of the HTTP-STATUS-CODE."
   (caddr (assoc http-status-code url-http-codes)))
@@ -306,25 +280,66 @@ Return a plist containing all cookie attributes."
 
 ;;; Core
 
-(defvar pdd-base-url nil
+(defcustom pdd-base-url nil
   "Concat with url when the url is not started with http.
-Use as dynamical binding usually." )
+Use as dynamical binding usually."
+  :type '(choice (const nil) string))
 
-(defvar pdd-default-sync nil
+(defcustom pdd-default-sync nil
   "The sync style when no :sync specified explicitly for function `pdd'.
-It's value should be :sync or :async.  Default nil means not specified.")
+It's value should be :sync or :async.  Default nil means not specified."
+  :type '(choice (const :tag "Unspecified" nil)
+                 (const :tag "Synchronous" :sync)
+                 (const :tag "Asynchronous" :async)))
 
-(defvar pdd-default-timeout 60
-  "Default timetout seconds for the request.")
+(defcustom pdd-user-agent
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36"
+  "Default user agent used by request."
+  :type 'string)
 
-(defvar pdd-default-error-handler nil
-  "The default error handler which is a function same as callback of :fail.
-When error occurrs and no :fail specified, this will perform as the handler.
-Besides globally set, it also can be dynamically binding in let.")
+(defcustom pdd-default-proxy nil
+  "Default proxy used by the http request.
+
+This should be a url string in format proto://[user:pass@]host:port or a
+function return such a url string proxy."
+  :type '(choice (choice (const nil) string) string function))
+
+(defcustom pdd-default-timeout 60
+  "Default timetout seconds for the request."
+  :type 'natnum)
+
+(defcustom pdd-max-retry 1
+  "Default retry times when request timeout."
+  :type 'natnum)
 
 (defvar pdd-retry-condition
   (lambda (err) (string-match-p "timeout\\|408" (format "%s" err)))
   "Function determine whether should retry the request.")
+
+(defvar pdd-header-rewrite-rules
+  '((ct          . ("Content-Type"  . "%s"))
+    (ct-bin      . ("Content-Type"  . "application/octet-stream"))
+    (json        . ("Content-Type"  . "application/json"))
+    (json-u8     . ("Content-Type"  . "application/json; charset=utf-8"))
+    (www-url     . ("Content-Type"  . "application/x-www-form-urlencoded"))
+    (www-url-u8  . ("Content-Type"  . "application/x-www-form-urlencoded; charset=utf-8"))
+    (acc-github  . ("Accept"        . "application/vnd.github+json"))
+    (basic       . ("Authorization" . "Basic %s"))
+    (bear        . ("Authorization" . "Bearer %s"))
+    (auth        . ("Authorization" . "%s %s"))
+    (keep-alive  . ("Connection"    . "Keep-Alive"))
+    (ua-emacs    . ("User-Agent"    . "Emacs Agent")))
+  "Header abbreviation system for simpfying request definitions.
+
+Template Placeholders:
+  %s - Replaced with provided arguments
+
+Usage Examples:
+  json → (\"Content-Type\" . \"application/json\")
+  (bear \"token\") → (\"Authorization\" . \"Bearer token\")
+  (auth \"Basic\" \"creds\") → (\"Authorization\" . \"Basic creds\")
+
+They are be replaced when transforming request.")
 
 (defvar pdd-default-cookie-jar nil
   "Default cookie jar used when not specified in requests.
@@ -340,10 +355,12 @@ When the value is a function, it may accept either:
 This variable is used as a fallback when no cookie jar is explicitly
 provided in individual requests.")
 
-(defvar pdd-default-proxy nil
-  "Default proxy used by the request.")
+(defvar pdd-default-error-handler nil
+  "The default error handler which is a function same as callback of :fail.
+When error occurrs and no :fail specified, this will perform as the handler.
+Besides globally set, it also can be dynamically binding in let.")
 
-(defvar pdd-request-transformers
+(defconst pdd-default-request-transformers
   '(pdd-transform-req-done
     pdd-transform-req-filter
     pdd-transform-req-fail
@@ -360,11 +377,11 @@ list, with each transformer able to modify the request object before passing
 it to the next.
 
 This list contains built-in transformers that provide essential functionality.
-While you may append additional transformers to customize behavior, you should
-not remove or reorder the built-in transformers unless you fully understand the
-consequences.")
+While you may change them by override `pdd-request-transformers' to add
+additional transformers to customize behavior, you should not remove or reorder
+the built-in transformers unless you fully understand the consequences.")
 
-(defvar pdd-response-transformers
+(defconst pdd-default-response-transformers
   '(pdd-transform-resp-init
     pdd-transform-resp-headers
     pdd-transform-resp-cookies
@@ -377,25 +394,16 @@ Transformers are applied in the order they appear in this list, with each
 transformer able to modify the buffer state before passing it to the next.
 
 This list contains core transformers that handle essential response processing
-stages.  While you may safely append additional transformers to extend
-functionality, you should not remove or reorder the built-in transformers unless
-you fully understand their interdependencies.")
+stages.  While you may change them by override `pdd-response-transformers' to
+add additional transformers to extend functionality, you should not remove or
+reorder the built-in transformers unless you fully understand the consequences.")
 
 (defvar-local pdd-abort-flag nil
   "Non-nil means to ignore following request progress.")
 
-;; Backend
-
 (defclass pdd-backend ()
-  ((insts :allocation :class :initform nil)
-   (user-agent :initarg :user-agent
-               :initform nil
-               :type (or string null))
-   (proxy :initarg :proxy
-          :type (or string function null)
-          :initform nil
-          :documentation "URL in format proto://[user:pass@]host:port or a function return one."))
-  "Used to send http request."
+  ((insts :allocation :class :initform nil))
+  "Backend class."
   :abstract t)
 
 (cl-defmethod make-instance ((class (subclass pdd-backend)) &rest slots)
@@ -406,6 +414,16 @@ you fully understand their interdependencies.")
       old
     (let ((inst (cl-call-next-method)))
       (prog1 inst (oset-default class insts `((,key . ,inst) ,@insts))))))
+
+(defclass pdd-http-backend (pdd-backend)
+  ((user-agent :initarg :user-agent
+               :initform nil
+               :type (or string null))
+   (proxy :initarg :proxy
+          :type (or string function null)
+          :initform nil))
+  "Used to send http request."
+  :abstract t)
 
 ;; Cookie
 
@@ -566,7 +584,7 @@ If JAR is nil, operates on the default cookie jar."
    (fine       :initarg :fine     :type (or function null) :initform nil)
    (sync       :initarg :sync)
    (buffer     :initarg :buffer   :initform nil)
-   (backend    :initarg :backend)
+   (backend    :initarg :backend  :type (or pdd-http-backend null))
    (cookie-jar :initarg :cookie-jar :type (or pdd-cookie-jar function null) :initform nil)
    (proxy      :initarg :proxy    :type (or string list null) :initform nil))
   "Abstract base class for HTTP request configs.")
@@ -767,7 +785,7 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params data timeout retry sync done buffer) request
+  (with-slots (url method params data timeout retry sync done buffer backend) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when params
@@ -781,13 +799,13 @@ If JAR is nil, operates on the default cookie jar."
     (unless retry (setf retry pdd-max-retry))
     (unless buffer (setf buffer (current-buffer)))
     ;; run all of the installed transformers with request
-    (cl-loop for transformer in pdd-request-transformers
+    (cl-loop for transformer in (pdd-request-transformers backend)
              do (pdd-log 'req (help-fns-function-name transformer))
              do (funcall transformer request))))
 
 (cl-defgeneric pdd-make-request (backend &rest _arg)
   "Instance request object for BACKEND."
-  (:method ((backend pdd-backend) &rest args)
+  (:method ((backend pdd-http-backend) &rest args)
            (apply #'pdd-request `(:backend ,backend :url ,@args))))
 
 ;; Response
@@ -859,12 +877,11 @@ If JAR is nil, operates on the default cookie jar."
   "Run all response transformers for REQUEST to get the results."
   (if pdd-abort-flag
       (pdd-log 'resp "skip (aborted).")
-    (with-slots (backend) request
-      (cl-loop for transformer in pdd-response-transformers
-               do (pdd-log 'resp (help-fns-function-name transformer))
-               do (funcall transformer request))
-      (list pdd-resp-body pdd-resp-headers
-            pdd-resp-status pdd-resp-version request))))
+    (cl-loop for transformer in (pdd-response-transformers (oref request backend))
+             do (pdd-log 'resp (help-fns-function-name transformer))
+             do (funcall transformer request))
+    (list pdd-resp-body pdd-resp-headers
+          pdd-resp-status pdd-resp-version request)))
 
 ;; Entrance
 
@@ -884,12 +901,14 @@ If JAR is nil, operates on the default cookie jar."
                             retry
                             proxy
                             &allow-other-keys)
-  "Send HTTP request using the specified BACKEND.
+  "Send request using the specified BACKEND.
 
 This is a generic function with implementations provided by backend classes.
 
+The documentation below is mainly described for the general http backend.
+
 Parameters:
-  BACKEND  - HTTP backend instance
+  BACKEND  - Backend instance
   URL      - Target URL (string)
 
 Keyword Arguments:
@@ -920,7 +939,7 @@ Keyword Arguments:
   :SYNC    - Whether to execute synchronously (boolean)
   :TIMEOUT - Timeout in seconds
   :RETRY   - Number of retry attempts on timeout
-  :PROXY   - Proxy used by this request
+  :PROXY   - Proxy used by current http request
 
 Returns:
   Response data in sync mode, process object in async mode.
@@ -942,21 +961,32 @@ Examples:
   (pdd some-backend \"https://api.example.com/data\"
        :done (lambda (data) (message \"Got: %S\" data))
        :fail (lambda (err) (message \"Error: %S\" err)))."
-  (:method :around ((backend pdd-backend) &rest args)
-           (let ((request (if (cl-typep (car args) 'pdd-request)
-                              (car args)
-                            (apply #'pdd-make-request backend args))))
-             (pdd-log 'req "pdd:around...")
-             ;; User's :init callback is the final chance to change request
-             (with-slots (init) request (if init (pdd-funcall init (list request))))
-             ;; derived to specified backend to deal with the real request
-             (funcall #'cl-call-next-method backend :request request)))
   (declare (indent 1)))
+
+(cl-defmethod pdd :around ((backend pdd-http-backend) &rest args)
+  "The common logics before or after the http request for BACKEND.
+ARGS should a request instances or keywords to build the request."
+  (let ((request (if (cl-typep (car args) 'pdd-request)
+                     (car args)
+                   (apply #'pdd-make-request backend args))))
+    (pdd-log 'req "pdd:around...")
+    ;; User's :init callback is the final chance to change request
+    (with-slots (init) request (if init (pdd-funcall init (list request))))
+    ;; derived to specified backend to deal with the real request
+    (cl-call-next-method backend :request request)))
+
+(cl-defgeneric pdd-request-transformers (_backend)
+  "Return the request transformers will be used by BACKEND."
+  pdd-default-request-transformers)
+
+(cl-defgeneric pdd-response-transformers (_backend)
+  "Return the response transformers will be used by BACKEND."
+  pdd-default-response-transformers)
 
 
 ;;; Implement for url.el
 
-(defclass pdd-url-backend (pdd-backend) ()
+(defclass pdd-url-backend (pdd-http-backend) ()
   :documentation "Http Backend implemented using `url.el'.")
 
 (defvar url-http-content-type)
@@ -964,6 +994,10 @@ Examples:
 (defvar url-http-transfer-encoding)
 (defvar url-http-response-status)
 (defvar url-http-response-version)
+
+(defvar socks-server)
+(defvar socks-username)
+(defvar socks-password)
 
 (defvar pdd-url-extra-filter nil)
 
@@ -1030,9 +1064,10 @@ Examples:
             ((stringp proxy)
              (setq url-proxy-locator (lambda (&rest _) (concat "PROXY " proxy)))))
       ;; start url-retrive
-      (let* ((url-request-data datas)
-             (url-request-extra-headers headers)
-             (url-request-method (string-to-unibyte (upcase (format "%s" method))))
+      (let* ((url-request-method (string-to-unibyte (upcase (format "%s" method))))
+             (url-request-data datas)
+             (url-user-agent (alist-get "user-agent" headers nil nil #'string-equal-ignore-case))
+             (url-request-extra-headers (assoc-delete-all "user-agent" headers #'string-equal-ignore-case))
              (url-mime-encoding-string "identity")
              timer buffer-data data-buffer
              (callback (lambda (status)
@@ -1060,10 +1095,6 @@ Examples:
           "Proxy: %S"         proxy
           "User Agent: %s"    url-user-agent
           "MIME Encoding: %s" url-mime-encoding-string)
-        ;; Weird, but you have to bind `url-user-agent' like this to make it work
-        (setf (buffer-local-value 'url-user-agent proc-buffer)
-              (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
-                (oref backend user-agent) pdd-user-agent))
         ;; :filter support via hook
         (when (and filter (buffer-live-p proc-buffer))
           (with-current-buffer proc-buffer
@@ -1106,7 +1137,7 @@ Examples:
 
 ;;; Implement for plz.el
 
-(defclass pdd-curl-backend (pdd-backend)
+(defclass pdd-curl-backend (pdd-http-backend)
   ((extra-args
     :initarg :args
     :type list
@@ -1125,12 +1156,6 @@ Examples:
 (declare-function plz-error-response "ext:plz.el" t t)
 (declare-function plz-response-status "ext:plz.el" t t)
 (declare-function plz-response-body "ext:plz.el" t t)
-
-(defvar pdd-plz-initialize-error-message
-  "\n\nTry to install curl and specify the program like this to solve the problem:\n
-  (setq plz-curl-program \"c:/msys64/usr/bin/curl.exe\")\n
-Or switch http backend to `pdd-url-backend' instead:\n
-  (setq pdd-default-backend (pdd-url-backend))")
 
 (cl-defmethod pdd :before ((_ pdd-curl-backend) &rest _)
   "Check if `plz.el' is available."
@@ -1151,14 +1176,17 @@ Or switch http backend to `pdd-url-backend' instead:\n
   (when (and (consp error) (memq (car error) '(plz-http-error plz-curl-error)))
     (setq error (caddr error)))
   (if (not (plz-error-p error)) error
-    (if-let* ((msg (plz-error-message error)))
-        (list 'plz-error msg)
+    (if-let* ((display (plz-error-message error)))
+        (list 'plz-error display)
       (if-let* ((curl (plz-error-curl-error error)))
           (list 'plz-error
                 (concat (format "%s" (or (cdr curl) (car curl)))
                         (pcase (car curl)
                           (2 (when (memq system-type '(cygwin windows-nt ms-dos))
-                               pdd-plz-initialize-error-message)))))
+                               "\n\nTry to install curl and specify the program like this to solve the problem:\n
+  (setq plz-curl-program \"c:/msys64/usr/bin/curl.exe\")\n
+Or switch http backend to `pdd-url-backend' instead:\n
+  (setq pdd-default-backend (pdd-url-backend))")))))
         (if-let* ((res (plz-error-response error))
                   (code (plz-response-status res)))
             (list 'error (pdd-http-code-text code) code)
@@ -1242,7 +1270,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
   "Default backend used by `pdd' for HTTP requests.
 
 The value can be either:
-- A instance of function `pdd-backend', or
+- A instance of function `pdd-http-backend', or
 - A function that returns such a instance.
 
 When the value is a function, it will be called with:
