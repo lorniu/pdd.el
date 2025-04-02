@@ -41,7 +41,7 @@ To make proxy smarter, use a function instead of the url string:
         (with-slots (url) request
           (cond
            ((string-match-p "localhost\\|127\\.0" url) nil)
-           ((string-match-p "httpbin") "http://site-a:8080")
+           ((string-match-p "httpbin") "http://localhost:8080")
            (t (getenv "HTTPS_PROXY"))))))
 ```
 
@@ -70,18 +70,17 @@ Protocol-Specific Proxies:
 ```emacs-lisp
 (setq pdd-default-proxy
       (lambda (req)
-        (with-slots (url) req
-          (pcase (url-type (url-generic-parse-url url))
-            ("https" "http://ssl-proxy:8080")
-            ("http"  "http://plain-proxy:8080")
-            ("ftp"   "socks5://ftp-gateway:1080"))))
+        (pcase (url-type (url-generic-parse-url (oref req url)))
+          ("https" "http://ssl-proxy:8080")
+          ("http"  "http://plain-proxy:8080")
+          ("ftp"   "socks5://ftp-gateway:1080"))))
 ```
 
 Traffic Shaping:
 ```emacs-lisp
 (setq pdd-default-proxy
-      (lambda (req)
-        (with-slots (data) req
+      (lambda (request)
+        (with-slots (data) request
           ;; Route large uploads through high-bandwidth proxy
           (if (> (length data) (* 10 1024 1024))  ; 10MB threshold
               "http://bulk-upload-proxy:8080"
@@ -94,7 +93,7 @@ Failover Proxies (can extend to a proxy pool):
   '("http://primary:8080" "http://secondary:8080"))
 
 (setq pdd-default-proxy
-      (lambda (request)
+      (lambda ()
         (cl-loop for proxy in (sort pdd-proxy-list #'proxy-priority)
                  when (proxy-available-p proxy)
                  return proxy)))
@@ -102,4 +101,4 @@ Failover Proxies (can extend to a proxy pool):
 
 ## Miscellaneous
 
-**Note:** The URL backend automatically applies the same proxy to both HTTP and HTTPS connections by default. To implement protocol-specific proxy routing (e.g., different proxies for HTTP vs HTTPS), you can use a dynamic proxy function as the Protocol-Specific example.
+**Notice:** The URL backend automatically applies the same proxy to both HTTP and HTTPS connections by default. To implement protocol-specific proxy routing (e.g., different proxies for HTTP vs HTTPS), you can use a dynamic proxy function as the Protocol-Specific example.

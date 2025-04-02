@@ -53,11 +53,10 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'url-http)
-(require 'socks)
 (require 'eieio)
-(require 'json)
 (require 'help)
+(require 'json)
+(require 'url-http)
 
 (defgroup pdd nil
   "HTTP Library Adapter."
@@ -986,6 +985,9 @@ ARGS should a request instances or keywords to build the request."
 
 ;;; Implement for url.el
 
+(require 'socks)
+(require 'gnutls)
+
 (defclass pdd-url-backend (pdd-http-backend) ()
   :documentation "Http Backend implemented using `url.el'.")
 
@@ -998,6 +1000,7 @@ ARGS should a request instances or keywords to build the request."
 (defvar socks-server)
 (defvar socks-username)
 (defvar socks-password)
+(defvar tls-params)
 
 (defvar pdd-url-extra-filter nil)
 
@@ -1014,7 +1017,7 @@ ARGS should a request instances or keywords to build the request."
                 (setq version (string-to-number version)))
                ((equal version "4a")
                 (setq version '4a))
-               (t (user-error "Maybe invalid socket proxy setup")))
+               (t (user-error "Maybe invalid socket proxy setup, url.el only support socks4, socks5 and socks4a")))
               (list :server (list "Default server" host port version)
                     :user user :pass pass))
           ;; case of using http proxy, used by `url-proxy-locator'
@@ -1054,85 +1057,103 @@ ARGS should a request instances or keywords to build the request."
            (socks-server (if proxy nil socks-server))
            (socks-username (if proxy nil socks-username))
            (socks-password (if proxy nil socks-password))
-           (url-gateway-method (if proxy 'native url-gateway-method))
+           (origin-url-https (symbol-function 'url-https))
+           (origin-socks-open-network-stream (symbol-function 'socks-open-network-stream))
            (url-proxy-locator (if proxy (lambda (&rest _) "DIRECT") url-proxy-locator)))
-      (cond ((consp proxy)
-             (setq url-gateway-method 'socks
-                   socks-server (plist-get proxy :server)
-                   socks-username (plist-get proxy :user)
-                   socks-password (plist-get proxy :pass)))
-            ((stringp proxy)
-             (setq url-proxy-locator (lambda (&rest _) (concat "PROXY " proxy)))))
-      ;; start url-retrive
-      (let* ((url-request-method (string-to-unibyte (upcase (format "%s" method))))
-             (url-request-data datas)
-             (url-user-agent (alist-get "user-agent" headers nil nil #'string-equal-ignore-case))
-             (url-request-extra-headers (assoc-delete-all "user-agent" headers #'string-equal-ignore-case))
-             (url-mime-encoding-string "identity")
-             timer buffer-data data-buffer
-             (callback (lambda (status)
-                         (pdd-log 'url-backend "callback.")
-                         (ignore-errors (cancel-timer timer))
-                         (setq data-buffer (current-buffer))
-                         (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
-                         (if pdd-abort-flag
-                             (pdd-log 'url-backend "skip done (aborted).")
-                           (unwind-protect
-                               (if-let* ((err (pdd-transform-error backend status)))
-                                   (progn (pdd-log 'url-backend "before fail")
-                                          (funcall fail err))
-                                 (pdd-log 'url-backend "before done")
-                                 (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
-                             (unless sync (kill-buffer data-buffer))))))
-             (proc-buffer (url-retrieve url callback nil t t))
-             (process (get-buffer-process proc-buffer)))
-        ;; log
-        (pdd-log 'url-backend
-          "%s %s"             url-request-method url
-          "HEADER: %S"        url-request-extra-headers
-          "DATA: %s"          url-request-data
-          "BINARY: %s"        binaryp
-          "Proxy: %S"         proxy
-          "User Agent: %s"    url-user-agent
-          "MIME Encoding: %s" url-mime-encoding-string)
-        ;; :filter support via hook
-        (when (and filter (buffer-live-p proc-buffer))
-          (with-current-buffer proc-buffer
-            (setq-local pdd-url-extra-filter filter)
-            (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)))
-        ;; :timeout support via timer
-        (when (numberp timeout)
-          (let ((timer-callback
-                 (lambda ()
-                   (pdd-log 'timer "kill timeout.")
-                   (unless data-buffer
-                     (ignore-errors (stop-process process))
-                     (ignore-errors
-                       (with-current-buffer proc-buffer
-                         (erase-buffer)
-                         (setq-local url-http-end-of-headers 30)
-                         (insert "HTTP/1.1 408 Operation timeout")))
-                     (ignore-errors (delete-process process))))))
-            (setq timer (run-with-timer timeout nil timer-callback))))
-        (if (and sync proc-buffer)
-            ;; copy from `url-retrieve-synchronously'
-            (catch 'pdd-done
-              (when-let* ((redirect-buffer (buffer-local-value 'url-redirect-buffer proc-buffer)))
-                (unless (eq redirect-buffer proc-buffer)
-                  (let (kill-buffer-query-functions)
-                    (kill-buffer proc-buffer))
-                  (setq proc-buffer redirect-buffer)))
-              (when-let* ((proc (get-buffer-process proc-buffer)))
-                (when (memq (process-status proc) '(closed exit signal failed))
-                  (unless data-buffer
-		            (throw 'pdd-done 'exception))))
-              (with-local-quit
-                (while (and (process-live-p process)
-                            (not (buffer-local-value 'pdd-abort-flag proc-buffer))
-                            (not data-buffer))
-                  (accept-process-output nil 0.05)))
-              buffer-data)
-          process)))))
+      ;; It's not an easy thing to make url.el support tls over socks proxy
+      ;; - [bug#13833] https://lists.nongnu.org/archive/html/bug-gnu-emacs/2025-03/msg01757.html
+      ;; - [bug#53941] https://lists.gnu.org/archive/html/bug-gnu-emacs/2024-09/msg00836.html
+      ;; Patch like below looks wired, but seems it makes proxy work well, both http and socks proxy
+      (cl-letf (((symbol-function 'url-https)
+                 (if (and proxy (consp proxy))
+                     (lambda (url callback cbargs)
+                       (url-http url callback cbargs nil 'socks))
+                   origin-url-https))
+                ((symbol-function 'socks-open-network-stream)
+                 (if (and proxy (consp proxy))
+                     (lambda (name buffer host service)
+                       (let ((proc (funcall origin-socks-open-network-stream name buffer host service)))
+                         (if (string-prefix-p "https" url)
+                             (let ((tls-params (list :hostname host :verify-error nil)))
+                               (gnutls-negotiate :process proc :type 'gnutls-x509pki :hostname host))
+                           proc)))
+                   origin-socks-open-network-stream)))
+        (cond ((consp proxy)
+               (setq socks-server (plist-get proxy :server)
+                     socks-username (plist-get proxy :user)
+                     socks-password (plist-get proxy :pass)))
+              ((stringp proxy)
+               (setq url-proxy-locator (lambda (&rest _) (concat "PROXY " proxy)))))
+        ;; start url-retrive
+        (let* ((url-request-method (string-to-unibyte (upcase (format "%s" method))))
+               (url-request-data datas)
+               (url-user-agent (alist-get "user-agent" headers nil nil #'string-equal-ignore-case))
+               (url-request-extra-headers (assoc-delete-all "user-agent" headers #'string-equal-ignore-case))
+               (url-mime-encoding-string "identity")
+               timer buffer-data data-buffer
+               (callback (lambda (status)
+                           (pdd-log 'url-backend "callback.")
+                           (ignore-errors (cancel-timer timer))
+                           (setq data-buffer (current-buffer))
+                           (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
+                           (if pdd-abort-flag
+                               (pdd-log 'url-backend "skip done (aborted).")
+                             (unwind-protect
+                                 (if-let* ((err (pdd-transform-error backend status)))
+                                     (progn (pdd-log 'url-backend "before fail")
+                                            (funcall fail err))
+                                   (pdd-log 'url-backend "before done")
+                                   (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
+                               (unless sync (kill-buffer data-buffer))))))
+               (proc-buffer (url-retrieve url callback nil t t))
+               (process (get-buffer-process proc-buffer)))
+          ;; log
+          (pdd-log 'url-backend
+            "%s %s"             url-request-method url
+            "HEADER: %S"        url-request-extra-headers
+            "DATA: %s"          url-request-data
+            "BINARY: %s"        binaryp
+            "Proxy: %S"         proxy
+            "User Agent: %s"    url-user-agent
+            "MIME Encoding: %s" url-mime-encoding-string)
+          ;; :filter support via hook
+          (when (and filter (buffer-live-p proc-buffer))
+            (with-current-buffer proc-buffer
+              (setq-local pdd-url-extra-filter filter)
+              (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)))
+          ;; :timeout support via timer
+          (when (numberp timeout)
+            (let ((timer-callback
+                   (lambda ()
+                     (pdd-log 'timer "kill timeout.")
+                     (unless data-buffer
+                       (ignore-errors (stop-process process))
+                       (ignore-errors
+                         (with-current-buffer proc-buffer
+                           (erase-buffer)
+                           (setq-local url-http-end-of-headers 30)
+                           (insert "HTTP/1.1 408 Operation timeout")))
+                       (ignore-errors (delete-process process))))))
+              (setq timer (run-with-timer timeout nil timer-callback))))
+          (if (and sync proc-buffer)
+              ;; copy from `url-retrieve-synchronously'
+              (catch 'pdd-done
+                (when-let* ((redirect-buffer (buffer-local-value 'url-redirect-buffer proc-buffer)))
+                  (unless (eq redirect-buffer proc-buffer)
+                    (let (kill-buffer-query-functions)
+                      (kill-buffer proc-buffer))
+                    (setq proc-buffer redirect-buffer)))
+                (when-let* ((proc (get-buffer-process proc-buffer)))
+                  (when (memq (process-status proc) '(closed exit signal failed))
+                    (unless data-buffer
+		              (throw 'pdd-done 'exception))))
+                (with-local-quit
+                  (while (and (process-live-p process)
+                              (not (buffer-local-value 'pdd-abort-flag proc-buffer))
+                              (not data-buffer))
+                    (accept-process-output nil 0.05)))
+                buffer-data)
+            process))))))
 
 
 ;;; Implement for plz.el
