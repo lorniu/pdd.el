@@ -276,6 +276,11 @@ Return a plist containing all cookie attributes."
   (let ((n (car (func-arity fn))))
     (apply fn (cl-loop for i from 1 to n for x in args collect x))))
 
+(cl-defgeneric pdd-string-to-object (_type string)
+  "Convert STRING to an Elisp object based on the specified content TYPE."
+  (:method ((_ (eql 'json)) string) (json-read-from-string string))
+  string)
+
 
 ;;; Core
 
@@ -863,14 +868,14 @@ If JAR is nil, operates on the default cookie jar."
   "Convert response body as `pdd-resp-body' for REQUEST."
   (with-slots (resp url) request
     (setq pdd-resp-body
-          (buffer-substring pdd-resp-mark (point-max)))
-    (cond
-     ((functionp resp)
-      (setq pdd-resp-body
-            (pdd-funcall resp (list pdd-resp-body pdd-resp-headers))))
-     ((string-match-p "/json" (alist-get 'content-type pdd-resp-headers))
-      (setq pdd-resp-body
-            (json-read-from-string pdd-resp-body))))))
+          (buffer-substring pdd-resp-mark (point-max))
+          pdd-resp-body
+          (if (functionp resp)
+              (pdd-funcall resp (list pdd-resp-body pdd-resp-headers))
+            (let* ((ct (alist-get 'content-type pdd-resp-headers))
+                   (type (cond ((string-match-p "/json" ct) 'json)
+                               (t (intern (car (string-split ct "[; ]")))))))
+              (pdd-string-to-object type pdd-resp-body))))))
 
 (cl-defmethod pdd-transform-response (request)
   "Run all response transformers for REQUEST to get the results."
