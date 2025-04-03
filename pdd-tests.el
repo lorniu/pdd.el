@@ -40,8 +40,8 @@
 (defvar pdd-test-host "https://httpbin.org")
 
 ;;(setq pdd-debug nil)
-;;(setq pdd-default-sync :sync)
-;;(setq pdd-default-sync :async)
+;;(setq pdd-default-sync nil)
+;;(setq pdd-default-sync t)
 ;;(setq pdd-base-url pdd-test-host)
 ;;(setq pdd-default-backend (pdd-url-backend))
 ;;(setq pdd-default-backend (pdd-curl-backend))
@@ -131,6 +131,14 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
                           by #'cddr unless (eq k :created-at) append (list k v))
                  '(:name "id" :value "a3fWa" :expires (22055 16000) :max-age 2592000 :secure t :path "/" :domain "example.com"))))
 
+(ert-deftest pdd-test-task-then ()
+  (should (= (let ((t1 (pdd-task)))
+               (pdd-then t1
+                 (lambda (v) (+ v 1))
+                 (lambda (e) e))
+               (pdd-task-resolve t1 41))
+             42)))
+
 
 ;;; Request Tests
 
@@ -196,11 +204,11 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
           (equal (alist-get 'data it) "a=1")))
 
 (pdd-deftests content-length ()
-  (should (pdd "/ip" :resp #'identity :done (lambda (r h) (setq it (cons r h))))
+  (should (pdd "/ip" :as #'identity :done (lambda (r h) (setq it (cons r h))))
           (should (= (string-to-number (alist-get 'content-length (cdr it)))
                      (length (car it)))))
   (should (pdd "/post"
-            :resp #'identity
+            :as #'identity
             :data '((a . "hello, world, 你好啊"))
             :done (lambda (r h) (setq it (cons r h))))
           (should (= (string-to-number (alist-get 'content-length (cdr it)))

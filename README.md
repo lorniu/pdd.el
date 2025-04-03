@@ -1,27 +1,30 @@
-# HTTP Library for Emacs
+# HTTP library & Async Toolkit for Emacs
 
-A versatile HTTP library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
+This package provides a robust and elegant library for HTTP requests and asynchronous operations in Emacs. It featuring a **single, consistent API** that works identically across different backends, maximizing code portability and simplifying development.
 
- - Choose between built-in `url.el` or high-performance `curl` backends. It gracefully falls back to `url.el` when `curl` is unavailable without requiring code changes.
- - Rich feature set including multipart uploads, streaming support, cookie-jar support, proxy support, intercepters support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
- - Minimalist yet intuitive API that works consistently across backends. Features like variadic callbacks and header abbreviation rules help you accomplish more with less code.
- - Extensible architecture makes it easy to add new backends.
+Core Strengths:
 
-Table of contents:
-- [Usage](#Usage) · [API](#API) · [Examples](#Examples)
-- [How to use proxy](docs/proxy.md)
-- [How to manage cookies](docs/cookie-jar.md)
-- [Compare with plz.el](#Comparison)
+*   **Powerful Async Foundation:** Features a native, cancellable `Promise/A+` implementation and intuitive `async/await` syntax for clean, readable concurrent code. Includes integrated async helpers for `timers` and external `processes`.
+*   **Unified Backend:** Seamlessly utilize either the high-performance `curl` backend or the built-in `url.el`. It significantly enhances `url.el`, adding essential features like cookie-jar support, streaming support, multipart uploads, comprehensive proxy support (HTTP/SOCKS with auth-source integration), smart request/response data conversion and automatic retries.
+*   **Developer Friendly:** Offers a minimalist yet flexible API that is backend-agnostic, intuitive and easy to use. Features like variadic callbacks and header abbreviations can help you achieve more with less code.
+*   **Highly Extensible:** Easily customize request/response flows using a clean transformer pipeline and object-oriented (EIEIO) backend design. This makes it easy to add new features or event entirely new backends.
 
 Why this name?
 
 > In my language, pdd is the meaning of "get the thing you want quickly"
 
+Table of contents:
+- [Usage](#Usage) · [API](#API) · [Examples](#Examples)
+- [How to use `proxy`](docs/proxy.md)
+- [How to manage `cookies`](docs/cookie-jar.md)
+- [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
+- [Integrate `timers` with task and request](docs/task-timers.md)
+- [Integrate `make-process` with task and request](docs/task-process.md)
+- [Compare with plz.el](#Comparison)
+
 ## Installation
 
-Just download the `pdd.el` and place it in your `load-path`.
-
-> Notice: package `plz` is optionally. At present, if you prefer to use `curl` to send requests, make sure both `curl` and `plz` are available first.
+Download the `pdd.el` and place it in your `load-path`.
 
 ## Usage
 
@@ -65,6 +68,7 @@ And try to send requests like this:
   :method 'post)
 
 ;; If :done is present and :sync t is absent, the request will be asynchronous!
+;; Perhaps sometimes you should specify :sync nil to make it more explicit.
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (message "%s" res)))
@@ -78,7 +82,7 @@ And try to send requests like this:
 ;; Use `pdd-default-error-handler' to catch error when :fail is absent
 ;; Set its value globally, or just dynamically bind it with let
 (let ((pdd-default-error-handler
-       (lambda (_ code) (message "Crying for %s..." code))))
+       (lambda (err) (message "Crying for %s..." (caddr err)))))
   (pdd "https://httpbin.org/post-error"
     :data '(("key" . "value"))
     :done (lambda (res) (print res))))
@@ -165,7 +169,7 @@ Of course, there are tricks that can make things easier:
 (pdd 'delete "https://httpbin.org/delete")
 (pdd '((key . value)) "https://httpbin.org/anything" #'print)
 (pdd #'print 'put "https://httpbin.org/anything" '((key . value)) :timeout 2 :retry 3)
-(pdd #'insert 'post "https://httpbin.org/anything" :resp #'identity)
+(pdd #'insert 'post "https://httpbin.org/anything" :as #'identity)
 
 ;; Another sugar is, you can simply code of :headers in the help of abbrevs.
 ;; See `pdd-header-rewrite-rules' for more details. For example:
@@ -188,6 +192,33 @@ Of course, there are tricks that can make things easier:
   (pdd "https://httpbin.org/uuid" :retry 1) ; override the default variables
   (pdd "https://httpbin.org/user-agent" :headers nil))
 ```
+
+When handling multiple asynchronous requests, you may encounter **callback hell**, a tangled mess of nested callbacks. However, by using `pdd-task` and `pdd-async/await`, things become much easier ([more examples](docs/promise-and-await.md)):
+``` emacs-lisp
+;; For example, request for ip and uuid, then use the results to send new request:
+(pdd "https://httpbin.org/ip"
+  :done (lambda (r1)
+          (pdd "https://httpbin.org/uuid"
+            :done (lambda (r2)
+                    (pdd "https://httpbin.org/anything"
+                      :data `((r1 . ,(alist-get 'origin r1))
+                              (r2 . ,(alist-get 'uuid r2)))
+                      :done (lambda (r3)
+                              (message "> Got: %s"
+                                       (alist-get 'form r3))))))))
+
+;; You can just simplied as:
+(pdd-async
+  (let* ((r1 (await (pdd "https://httpbin.org/ip")
+                    (pdd "https://httpbin.org/uuid")))
+         (r2 (await (pdd "https://httpbin.org/anything"
+                      :data `((ip . ,(alist-get 'origin (car r1)))
+                              (id . ,(alist-get 'uuid (cadr r1))))))))
+    (message "> Got: %s" (alist-get 'form r2))))
+```
+
+You will see, it's very similar to C#/TypeScript, even more concise.
+
 ## Examples
 
 Download file with progress bar display:
@@ -214,7 +245,7 @@ Download file with progress bar display:
                             params
                             headers
                             data
-                            resp
+                            as
                             init
                             filter
                             done
@@ -249,7 +280,7 @@ Keyword Arguments:
              (lambda (&optional request))
   :FILTER  - Filter function called during data reception, signature:
              (lambda (&optional headers process request))
-  :RESP    - Response transformer function for raw response data, signature:
+  :AS      - Response transformer function for raw response data, signature:
              (lambda (data &optional headers))
   :DONE    - Success callback, signature:
              (lambda (&optional body headers status-code http-version request))
@@ -262,29 +293,30 @@ Keyword Arguments:
   :RETRY   - Number of retry attempts on timeout
 
 Returns:
-  Response data in sync mode, process object in async mode.)
+  Response data in sync mode, task object in async mode.)
 ```
 
 ## Comparison
 
-| Feature                   | pdd.el                           | plz.el                  |
-|---------------------------|----------------------------------|-------------------------|
-| **Backend Support**       | Multiple (url.el + curl via plz) | curl only               |
-| **Fallback Mechanism**    | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
-| **Multipart Uploads**     | ✅ Support                       | ❌ No                   |
-| **Encoding Handling**     | ✅ Auto detection and decoding   | ❌ Manual decode        |
-| **Type Conversion**       | ✅ Auto conversion               | ❌️ Manual convert       |
-| **Retry Logic**           | ✅ Configurable                  | ❌ None                 |
-| **Req/Resp Interceptors** | ✅ Support                       | ❌ None                 |
-| **Proxy support**         | ✅ Dynamic and easy              | ⚠️ Manual               |
-| **Auto Cookies manage**   | ✅ Support with cookie-jar       | ❌ No                   |
-| **Header Abbreviations**  | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
-| **Variadic Callbacks**    | ✅ Yes, make code cleaner        | ❌ No                   |
-| **Streaming Support**     | ✅ Full                          | ✅ Full                 |
-| **Error Handling**        | ✅ Robust                        | ✅ Robust               |
-| **Sync/Async Modes**      | ✅ Both supported                | ✅ Both supported       |
-| **Customization**         | ✅ Extensive                     | ⚠️ Limited              |
-| **Dependencies**          | None (url.el built-in)           | Requires curl binary    |
+| Feature                     | pdd.el                           | plz.el                  |
+|-----------------------------|----------------------------------|-------------------------|
+| **Backend Support**         | Multiple (url.el + curl via plz) | curl only               |
+| **Fallback Mechanism**      | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
+| **Multipart Uploads**       | ✅ Support                       | ❌ No                   |
+| **Encoding Handling**       | ✅ Auto detection and decoding   | ❌ Manual decode        |
+| **Type Conversion**         | ✅ Auto conversion               | ❌️ Manual convert       |
+| **Retry Logic**             | ✅ Configurable                  | ❌ None                 |
+| **Req/Resp Interceptors**   | ✅ Support                       | ❌ None                 |
+| **Proxy support**           | ✅ Dynamic and easy              | ⚠️ Manual               |
+| **Auto Cookies manage**     | ✅ Support with cookie-jar       | ❌ No                   |
+| **Promise integrated**      | ✅ Support                       | ❌ No                   |
+| **Async/Await support**     | ✅ Support                       | ❌ No                   |
+| **Header Abbreviations**    | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
+| **Variadic Callbacks**      | ✅ Yes, make code cleaner        | ❌ No                   |
+| **Streaming Support**       | ✅ Full                          | ✅ Full                 |
+| **Error Handling**          | ✅ Robust                        | ✅ Robust               |
+| **Customization**           | ✅ Extensive                     | ⚠️ Limited              |
+| **Dependencies**            | None (url.el built-in)           | Requires curl binary    |
 
 ## Miscellaneous
 
