@@ -5,7 +5,7 @@
 ;; Author: lorniu <lorniu@gmail.com>
 ;; URL: https://github.com/lorniu/pdd.el
 ;; License: GPL-3.0-or-later
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "27.1"))
 ;; Version: 0.1
 
 ;; This file is not part of GNU Emacs.
@@ -25,7 +25,7 @@
 
 ;;; Commentary:
 ;;
-;; A versatile HTTP library that provides a unified interface making http
+;; An awesome HTTP library that provides a unified interface making http
 ;; requests across multiple backend implementations easily. It is designed
 ;; for simplicity, flexibility and cross-platform compatibility.
 ;;
@@ -36,19 +36,32 @@
 ;;    cookie-jar support, intercepters support, automatic retry strategies,
 ;;    and smart data conversion. Enhances `url.el' to support all these
 ;;    capabilities and works well enough.
+;;  - Provide a `Promide/A+' and `async/await' implementation and make the
+;;    syntax of concurrent requests elegant and simple.
 ;;  - Minimalist yet intuitive API that works consistently across backends.
 ;;    Features like variadic callbacks and header abbreviation rules help
 ;;    you accomplish more with less code.
-;;  - Extensible architecture makes it easy to add new backends.
+;;  - Extensible architecture makes it easy to add new features, even add
+;;    new backends.
+;;
+;;      (pdd "https://httpbin.org/uuid" #'print)
 ;;
 ;;      (pdd "https://httpbin.org/post"
 ;;        :headers '((bear "hello world"))
 ;;        :params '((name . "jerry") (age . 9))
 ;;        :data '((key . "value") (file1 "~/aaa.jpg"))
-;;        :done (lambda (json) (alist-get 'file json)))
+;;        :done (lambda (json) (alist-get 'file json))
+;;        :proxy "socks5://localhost:1085"
+;;        :cookie-jar (pdd-cookie-jar "~/xxx.mycookie"))
+;;
+;;      (pdd-let* ((r1 (await (pdd "https://httpbin.org/ip")
+;;                            (pdd "https://httpbin.org/uuid")))
+;;                 (r2 (await (pdd "https://httpbin.org/anything"
+;;                              :data `((ip . ,(alist-get 'origin (car r1)))
+;;                                      (id . ,(alist-get 'uuid (cadr r1))))))))
+;;        (message "> Got: %s" (alist-get 'form r2)))
 ;;
 ;; See README.md of https://github.com/lorniu/pdd.el for more
-
 
 ;;; Code:
 
@@ -64,7 +77,7 @@
 
 (defcustom pdd-debug nil
   "Debug flag."
-  :type 'boolean)
+  :type '(choice boolean symbol))
 
 (defvar pdd-debug-buffer nil
   "Where to show the log message.")
@@ -74,7 +87,9 @@
 TAG usually is the name of current http backend.  ARGS should be fmt and
 rest arguments."
   (declare (indent 1))
-  (when pdd-debug
+  (when (and pdd-debug
+             (or (eq tag pdd-debug)
+                 (and (eq pdd-debug t) (not (eq tag 'task)))))
     (cl-loop with sub = nil
              with fmt = (format "[%s] " (or tag "pdd"))
              with display = (lambda (args)
@@ -87,18 +102,17 @@ rest arguments."
                                     (princ "\n" (current-buffer)))
                                 (apply #'message args)))
              for el in args
-             if (and (stringp el) (cl-find ?% el))
+             if (and (stringp el) (string-match-p "%[sSdx]" el))
              do (progn (if sub (funcall display sub)) (setq sub (list el)))
              else do (push el sub)
              finally (funcall display sub))))
 
-(defconst pdd-common-cache (make-hash-table :test 'equal)
-  "Global hash table for caching computed values.")
+(defconst pdd-common-cache (make-hash-table :test 'equal))
 
 (defmacro pdd-with-common-cache (key &rest body)
   "Execute BODY and cache its result under KEY."
   (declare (indent 1))
-  (cl-with-gensyms (keysmb valsmb cache)
+  (let ((keysmb (gensym)) (valsmb (gensym)) (cache (gensym)))
     `(let* ((,keysmb ,key)
             (,cache (gethash ,keysmb pdd-common-cache 'no-x-cache)))
        (if (not (eq ,cache 'no-x-cache))
@@ -121,7 +135,7 @@ rest arguments."
   (when content-type
     (pdd-with-common-cache (cons 'binaryp content-type)
       (cl-destructuring-bind (mime sub)
-          (string-split content-type "/" nil "[ \n\r\t]")
+          (split-string content-type "/" nil "[ \n\r\t]")
         (not (or (equal mime "text")
                  (and (equal mime "application")
                       (string-match-p
@@ -194,7 +208,7 @@ Returns the multipart data as a unibyte string."
 (defun pdd-split-string-from-= (string &optional url-decode)
   "Split STRING at the first = into two parts.
 Try to unhex the second part when URL-DECODE is not nil."
-  (let* ((p (string-search "=" string))
+  (let* ((p (cl-find ?= string))
          (k (if p (substring string 0 p) string))
          (v (if p (substring string (1+ p)))))
     (cons k (when (and v (not (string-empty-p v)))
@@ -286,6 +300,30 @@ Return a plist containing all cookie attributes."
   "Return text description of the HTTP-STATUS-CODE."
   (caddr (assoc http-status-code url-http-codes)))
 
+(cl-defmacro pdd-with-record ((&rest vars) record &rest body)
+  "Destructuring bind VARS for RECORD using by BODY."
+  (declare (indent 2) (debug ((&rest symbolp) form body)))
+  (let ((var (gensym)))
+    `(let ((,var ,record))
+       (cl-symbol-macrolet
+           ,(cl-loop for i in vars for n from 1
+                     unless (eq i '_)
+                     collect (list i `(aref ,var ,n)))
+         ,@body))))
+
+(defun pdd-string-iequal (string1 string2)
+  "Compare STRING1 and STRING2 case-insensitively."
+  (eq t (compare-strings string1 0 nil string2 0 nil t)))
+
+(defun pdd-function-arglist (function)
+  "Return the required argument list of FUNCTION to build decorate function."
+  (cl-loop for arg in
+           (if (or (null function) (equal (func-arity function) '(0 . many)))
+               '(a1)
+             (help-function-arglist function))
+           until (memq arg '(&rest &optional &key))
+           collect arg))
+
 (defun pdd-funcall (fn args)
   "Call function FN with the first N arguments from ARGS, where N is FN's arity."
   (declare (indent 1))
@@ -320,12 +358,12 @@ Return a plist containing all cookie attributes."
 Use as dynamical binding usually."
   :type '(choice (const nil) string))
 
-(defcustom pdd-default-sync nil
+(defcustom pdd-default-sync 'unset
   "The sync style when no :sync specified explicitly for function `pdd'.
-It's value should be :sync or :async.  Default nil means not specified."
-  :type '(choice (const :tag "Unspecified" nil)
-                 (const :tag "Synchronous" :sync)
-                 (const :tag "Asynchronous" :async)))
+It's value should be t or nil.  Default unset means not specified."
+  :type '(choice (const :tag "Unspecified" unset)
+                 (const :tag "Synchronous" t)
+                 (const :tag "Asynchronous" nil)))
 
 (defcustom pdd-user-agent
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36"
@@ -390,8 +428,22 @@ When the value is a function, it may accept either:
 This variable is used as a fallback when no cookie jar is explicitly
 provided in individual requests.")
 
-(defvar pdd-default-error-handler nil
-  "The default error handler which is a function same as callback of :fail.
+(defvar pdd-default-error-handler
+  (lambda (err &optional req)
+    (pdd-log 'fail "display error with default-error-handler")
+    (when (eq (car err) 'error) ; avoid 'peculiar error'
+      (setf (car err) 'user-error))
+    (let ((abort-flag (and req (with-no-warnings (oref req abort-flag)))))
+      (message
+       "[%s] %s"
+       (if abort-flag abort-flag "unhandled error")
+       (if (get (car err) 'error-conditions)
+           (error-message-string err)
+         (mapconcat (lambda (e) (format "%s" e)) err ", ")))))
+  "The default error handler that display errors when they are not handled by user.
+
+The signature of the handler is (error &optional request).
+
 When error occurrs and no :fail specified, this will perform as the handler.
 Besides globally set, it also can be dynamically binding in let.")
 
@@ -433,8 +485,43 @@ stages.  While you may change them by override `pdd-response-transformers' to
 add additional transformers to extend functionality, you should not remove or
 reorder the built-in transformers unless you fully understand the consequences.")
 
-(defvar-local pdd-abort-flag nil
-  "Non-nil means to ignore following request progress.")
+(defvar pdd-default-headers nil)
+(defvar pdd-default-data nil)
+(defvar pdd-default-done nil)
+(defvar pdd-default-filter nil)
+
+(eval-when-compile
+  (defvar pdd--dynamic-context-vars
+    '(pdd-base-url
+      pdd-default-sync
+      pdd-user-agent
+      pdd-default-proxy
+      pdd-default-timeout
+      pdd-default-retry
+      pdd-default-cookie-jar
+      pdd-default-error-handler
+      pdd-default-headers
+      pdd-default-data
+      pdd-default-done
+      pdd-default-filter)
+    "List of dynamic variables whose bindings should penetrate async callbacks."))
+
+(defun pdd--capture-dynamic-context ()
+  "Capture the current values of variables in `pdd--dynamic-context-vars'."
+  (cl-loop for var in pdd--dynamic-context-vars
+           if (boundp var) collect (cons var (symbol-value var))))
+
+(defmacro pdd--with-restored-dynamic-context (context &rest body)
+  "Execute BODY with dynamic variables restored from CONTEXT (an alist)."
+  (declare (indent 1) (debug t))
+  (let ((ctx-sym (gensym "context-")))
+    `(let* ((,ctx-sym ,context)
+            ,@(mapcar (lambda (var-val)
+                        `(,(car var-val) (cdr (assoc ',(car var-val) ,ctx-sym))))
+                      (mapcar #'list pdd--dynamic-context-vars)))
+       ,@body)))
+
+;; Backend
 
 (defclass pdd-backend ()
   ((insts :allocation :class :initform nil))
@@ -459,6 +546,517 @@ reorder the built-in transformers unless you fully understand the consequences."
           :initform nil))
   "Used to send http request."
   :abstract t)
+
+;; Task (Promise/A+)
+
+(defun pdd-task ()
+  "An object represents Promise/A+ compliant promise with signal support.
+
+Slots of task:
+    status/1, values/2, reason/3, callbacks/4,
+    signal-function/5,
+    reject-handled-p/6, inhibit-default-rejection-p/7.
+
+VALUE of status:
+    pending, fulfilled and rejected, default nil if not SUPPLIED.
+
+Each callback with function signature:
+    (on-fulfilled on-rejected child-task captured-context)."
+  ;;              0        1   2   3   4   5   6   7
+  (record 'pdd-task 'pending nil nil '() nil nil nil))
+
+(defun pdd-task-p (obj)
+  "Judge if OBJ is a `pdd-task'."
+  (eq (type-of obj) 'pdd-task))
+
+(defun pdd-task-ensure (value)
+  "Ensure VALUE is a task instance."
+  (if (pdd-task-p value) value (pdd-resolve value)))
+
+(defmacro pdd-with-new-task (&rest body)
+  "Help macro, execute BODY with a new task bound to `it', returning the task.
+Provide a `:signal function' anywhere in BODY to set signal function for task."
+  (declare (debug t))
+  (cl-labels ((repl-signal (form)
+                (cond ((atom form) form)
+                      ((cl-find :signal form)
+                       (let* ((pos (cl-position :signal form))
+                              (tail (nthcdr pos form)))
+                         (append (cl-subseq form 0 pos)
+                                 (cons `(aset it 5 ,(cadr tail)) (cddr tail)))))
+                      (t (cons (repl-signal (car form))
+                               (repl-signal (cdr form)))))))
+    `(let ((it (pdd-task))) ,@(repl-signal body) it)))
+
+(defun pdd-then (task &optional on-fulfilled on-rejected)
+  "Register callbacks to be called when the TASK is resolved or rejected.
+ON-FULFILLED ON-REJECTED are the callbacks for success and fail."
+  (declare (indent 1))
+  (unless (pdd-task-p task)
+    (user-error "Task must be a `pdd-task' instance"))
+  (pdd-with-new-task
+   (let ((context (pdd--capture-dynamic-context)))
+     (pdd-log 'task "    then | %s" (aref task 3))
+     (when (and on-rejected (functionp on-rejected))
+       (aset task 6 t)) ; mark as handled by downstream
+     (pcase (aref task 1)
+       ('pending (push (list on-fulfilled on-rejected it context) (aref task 4)))
+       (_ (pdd-task--execute task (list on-fulfilled on-rejected it context))))
+     (pdd-log 'task "        -> %s" (aref task 3) "        -> %s" it))))
+
+(defun pdd-resolve (&rest args)
+  "Resolve an existed task or create a new resolved task.
+
+If (car ARGS) is `pdd-task' then resolve it with values is (cdr args).
+
+Otherwise, create a new `pdd-task' which is rejected because of (car args)."
+  (declare (indent 1))
+  (if (or (not (car args)) (not (pdd-task-p (car args))))
+      (pdd-with-new-task
+       (aset it 1 'fulfilled)
+       (aset it 2 args))
+    (let* ((task (car args)) (values (cdr args)) (obj (car values)))
+      (pdd-log 'task " resolve | %s, value: %s" task values)
+      (cond ((not (eq (aref task 1) 'pending)) nil)
+            ((eq task obj)
+             (pdd-reject task (list 'type-error "Cannot resolve task with itself")))
+            ((pdd-task-p obj)
+             (pcase (aref obj 1)
+               ('pending
+                (pdd-then obj
+                  (lambda (v) (pdd-resolve task v))
+                  (lambda (r) (pdd-reject task r))))
+               ('fulfilled
+                (pdd-resolve task (aref obj 2)))
+               ('rejected
+                (pdd-reject task (aref obj 3)))))
+            ((or (cl-typep obj 'eieio-object) (functionp obj))
+             (condition-case err1
+                 (let ((called nil)
+                       (then (ignore-errors (with-no-warnings (eieio-oref obj 'then)))))
+                   (if (functionp then)
+                       (funcall then obj
+                                (lambda (r)
+                                  (unless called
+                                    (setq called t)
+                                    (pdd-resolve task r)))
+                                (lambda (r)
+                                  (unless called
+                                    (setq called t)
+                                    (pdd-reject task r))))
+                     (pdd-resolve task obj)))
+               (error (pdd-reject task err1))))
+            (t (pdd-task--settle task 'fulfilled values))))))
+
+(defun pdd-reject (&rest args)
+  "Reject an existed task or create a new rejected task.
+
+If (car ARGS) is `pdd-task' then reject it with reason (cadr args) and maybe
+with more metadata in (cddr args), such as execution context.
+
+Otherwise, create a new `pdd-task' which is rejected because of (car args)."
+  (declare (indent 1))
+  (if (or (not (car args)) (not (pdd-task-p (car args))))
+      (pdd-with-new-task
+       (aset it 1 'rejected)
+       (aset it 3 (car args)))
+    (let ((task (car args)) (reason (cdr args)))
+      (pdd-log 'task "  reject | %s, reason: %s" task reason)
+      (pdd-task--settle task 'rejected reason))))
+
+(defun pdd-signal (task &optional signal)
+  "Send a SIGNAL to the pending TASK to run the signal function if exists."
+  (pdd-with-record (status _ _ callbacks signal-fn) task
+    (when (eq status 'pending)
+      (pdd-log 'task "  signal | %s, signal: %s" task signal)
+      (if (functionp signal)
+          (funcall signal)
+        (when (functionp signal-fn)
+          (pdd-funcall signal-fn (list signal)))))))
+
+(defun pdd-task--settle (task status v)
+  "Settle TASK to STATUS with V is value or reason."
+  (pdd-with-record (s values reason callbacks _ reject-handled-p inhibit-default-rejection-p) task
+    (unless (eq s 'pending)
+      (user-error "Cannot settle non-pending task"))
+    (unless (memq status '(fulfilled rejected))
+      (user-error "Pending task only can be changed to fulfilled or rejected"))
+    (pcase (setf s status)
+      ('fulfilled
+       (setf values v))
+      ('rejected
+       (setf reason v)
+       ;; used to catch the final unhandled rejection, the way like javascript
+       (when (and (null callbacks)
+                  (not reject-handled-p)
+                  (not inhibit-default-rejection-p))
+         (run-with-idle-timer 0.1 nil #'pdd-task--reject-unhandled task v)))
+      (_ (user-error "Wrong status settled")))
+    (when callbacks ; propagate the flag to child task
+      (let ((child-task (nth 2 (car callbacks))))
+        (aset child-task 7 inhibit-default-rejection-p)))
+    (while callbacks
+      (let ((cb (pop callbacks)))
+        ;; This should be executed as a micro-task-queue
+        (run-at-time 0 nil (lambda () (pdd-task--execute task cb)))))))
+
+(defun pdd-task--execute (task callback)
+  "Execute a single CALLBACK for the TASK."
+  (pdd-log 'task "        -> %s" callback)
+  (when callback
+    (cl-destructuring-bind (on-fulfilled on-rejected child-task context) callback
+      (condition-case err1
+          (pdd-with-record (status values reason) task
+            (pcase status
+              ('fulfilled
+               (if (functionp on-fulfilled)
+                   (let ((result (pdd--with-restored-dynamic-context context
+                                   (pdd-funcall on-fulfilled values))))
+                     (if (pdd-task-p result)
+                         (pdd-then result
+                           (lambda (v) (pdd-resolve child-task v))
+                           (lambda (r) (pdd-reject child-task r)))
+                       (pdd-resolve child-task result)))
+                 (apply #'pdd-resolve child-task values)))
+              ('rejected
+               (if (functionp on-rejected)
+                   (let ((result (pdd--with-restored-dynamic-context context
+                                   (pdd-funcall on-rejected reason))))
+                     (if (pdd-task-p result)
+                         (pdd-then result
+                           (lambda (v) (pdd-resolve child-task v))
+                           (lambda (r) (pdd-reject child-task r)))
+                       (pdd-resolve child-task result)))
+                 (apply #'pdd-reject child-task reason))))
+            (pdd-log 'task "        -> %s" task))
+        (error (pdd-reject child-task err1))))))
+
+(defun pdd-task--reject-unhandled (task error)
+  "Default TASK rejection function when ERROR unhandled at last."
+  (cl-macrolet
+      ((deal-error-with-default-error-handler ()
+         `(when pdd-default-error-handler
+            (when (and (eq (aref task 1) 'rejected) ; still rejected
+                       (not (aref task 6)) ; still not handled
+                       (not (aref task 7))) ; and default not inhibited
+              (condition-case err
+                  (funcall pdd-default-error-handler (car error))
+                (error (message "Error executing default rejection handler: %s" err)))))))
+    (if-let* ((context (cadr error)))
+        (pdd--with-restored-dynamic-context context
+          (deal-error-with-default-error-handler))
+      (deal-error-with-default-error-handler))))
+
+(defun pdd-chain (task &rest callbacks)
+  "Chain multiple CALLBACKS to execute sequentially on the result of TASK.
+
+Creates a task chain where each callback in CALLBACKS is executed in order,
+with each receiving the result of the previous operation.
+
+Supports error handling via the :fail keyword, if present, it must be followed
+by a function that will catch the final task.
+
+NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+  (declare (indent 1))
+  (let* ((pdd-default-sync nil)
+         (pos (cl-position :fail callbacks))
+         (reject (when pos
+                   (if (functionp (ignore-errors (nth (1+ pos) callbacks)))
+                       (progn (pop (nthcdr pos callbacks))
+                              (pop (nthcdr pos callbacks)))
+                     (user-error "Key :fail should be a funtion"))))
+         (task (if (cl-every #'functionp callbacks)
+                   (cl-reduce (lambda (acc fn) (pdd-then acc fn))
+                              callbacks :initial-value (pdd-task-ensure task))
+                 (user-error "Every callback should be a function"))))
+    (if reject (pdd-then task #'identity reject) task)))
+
+(defun pdd-all (&rest tasks)
+  "Wait for all TASKS to complete and return a new task.
+
+NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+  (pdd-with-new-task
+   (if (null tasks)
+       (pdd-resolve it nil)
+     (let* ((pdd-default-sync nil)
+            (tasks (mapcar #'pdd-task-ensure tasks))
+            (results (make-vector (length tasks) nil))
+            (remaining (length tasks))
+            (has-settled nil))
+       (cl-loop for task in tasks
+                for i from 0
+                do (let ((index i))
+                     (pdd-then task
+                       (lambda (value)
+                         (unless has-settled
+                           (aset results index value)
+                           (cl-decf remaining)
+                           (when (zerop remaining)
+                             (setq has-settled t)
+                             (pdd-resolve it (cl-coerce results 'list)))))
+                       (lambda (reason)
+                         (unless has-settled
+                           (setq has-settled t)
+                           (pdd-reject it reason)
+                           (pdd-task--signal-cancel tasks))))))))))
+
+(defun pdd-any (&rest tasks)
+  "Wait for any of TASKS to succeed and return a new task.
+
+NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+  (pdd-with-new-task
+   (if (null tasks)
+       (pdd-reject it "No tasks provided")
+     (let* ((pdd-default-sync nil)
+            (tasks (mapcar #'pdd-task-ensure tasks))
+            (errors (make-vector (length tasks) nil))
+            (remaining (length tasks))
+            (has-fulfilled nil))
+       (cl-loop for task in tasks
+                for i from 0
+                do (let ((index i))
+                     (pdd-then task
+                       (lambda (value)
+                         (unless has-fulfilled
+                           (setq has-fulfilled t)
+                           (pdd-resolve it value)
+                           (pdd-task--signal-cancel tasks)))
+                       (lambda (reason)
+                         (unless has-fulfilled
+                           (setf (nth index errors) reason)
+                           (cl-decf remaining)
+                           (when (zerop remaining)
+                             (pdd-reject it (cl-coerce errors 'list))))))))))))
+
+(defun pdd-race (&rest tasks)
+  "Wait for first settled of the TASKS, return a new task.
+
+NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+  (pdd-with-new-task
+   (if (null tasks)
+       (pdd-reject it "No tasks provided")
+     (let* ((pdd-default-sync nil)
+            (tasks (mapcar #'pdd-task-ensure tasks))
+            (has-settled nil))
+       (cl-loop for task in tasks
+                do (pdd-then task
+                     (lambda (value)
+                       (unless has-settled
+                         (setq has-settled t)
+                         (pdd-resolve it value)
+                         (pdd-task--signal-cancel tasks)))
+                     (lambda (reason)
+                       (unless has-settled
+                         (setq has-settled t)
+                         (pdd-reject it reason)
+                         (pdd-task--signal-cancel tasks)))))))))
+
+(defun pdd-task--signal-cancel (tasks)
+  "Send cancel signals to all TASKS."
+  (dolist (task tasks)
+    (when (eq (aref task 1) 'pending)
+      (pdd-signal task 'cancel))))
+
+(defconst pdd-task--timer-pool (make-hash-table :weakness 'key))
+
+(defun pdd-clear--timer-tool ()
+  "Clear `pdd-task--timer-pool'."
+  (maphash (lambda (k _) (cancel-timer k)) pdd-task--timer-pool)
+  (clrhash pdd-task--timer-pool))
+
+(defun pdd-delay-task (time &optional value)
+  "Create a promise that resolve VALUE after a specified TIME delay.
+
+Arguments:
+  TIME:  Same as the first argument of `run-at-time'
+  VALUE: Optional value to resolve with (can be a function)
+
+Returns:
+  A promise object that will resolve after the specified delay.
+
+Examples:
+  (setq t1 (pdd-delay-task 5 \"hello\"))
+  (pdd-then t1 (lambda (r) (message r)))
+  (pdd-signal t1 \\='abort) ; the task can be cancelled by signal"
+  (declare (indent 1))
+  (pdd-with-new-task
+   (let* ((context (pdd--capture-dynamic-context))
+          (timer (run-at-time
+                  time nil (lambda ()
+                             (pdd--with-restored-dynamic-context context
+                               (condition-case err
+                                   (progn
+                                     (when (functionp value)
+                                       (setq value (funcall value)))
+                                     (pdd-resolve it value))
+                                 (error (pdd-reject it err))))))))
+     :signal (lambda ()
+               (if timer (cancel-timer timer))
+               (pdd-reject it 'abort))
+     (puthash timer it pdd-task--timer-pool))))
+
+(defun pdd-timeout-task (time)
+  "Create a new task that reject with timeout at time TIME.
+TIME is same as the argument of `run-at-time'."
+  (pdd-with-new-task
+   (let ((timer (run-at-time time nil (lambda () (pdd-reject it 'timeout)))))
+     :signal (lambda ()
+               (if timer (cancel-timer timer))
+               (pdd-reject it 'abort))
+     (puthash timer it pdd-task--timer-pool))))
+
+(cl-defun pdd-interval-task (secs count func &key init done fail fine)
+  "Create a new task that executes FUNC for COUNT times at every SECS.
+
+Use the return function of FUNC to explicitly give a resolve value to task and
+then exit it, otherwise the internal will finished with null value resolved.
+
+Also, the task can be cancelled by signal.
+
+Arguments:
+
+  SECS:  Seconds, a natnum number
+  COUNT: Number of times to execute FUNC. Can be:
+         * A number (execute N times)
+         * t (execute indefinitely), nil (only one time)
+         * A function with signature (&optional index) to check dynamically
+  FUNC:  Function to execute, with signature (&optional index return-fn timer):
+         * index: Current execution count (1-based)
+         * return-function: Function to call to stop future executions
+         * the timer itself
+  INIT:  Optional function to execute after timer is created (&optional timer)
+  DONE:  Optional function as resolved-fn when interval finished
+  FAIL:  Optional function as rejected-fn when interval failed
+  FINE:  Optional function always execute either success or fail
+
+Return a `pdd-task' object representing the scheduled task which has two values
+to be resolves: (index-of-interval-task-when-quit, return-value).
+
+Example:
+
+    (pdd-interval-task 1 5
+      (lambda (i)
+        (message \"Seq #%d\" i)))
+
+    (pdd-interval-task 1 t
+      (lambda (i ret)
+        (if (> (random 10) 5)
+            (funcall ret 777777))
+          (message \"Seq #%d\" i)))
+
+    ;; Task chain
+    (pdd-then
+        (pdd-interval-task 1 3
+          (lambda (i return)
+            (if (> (random 10) 6)
+                (funcall return 666)
+              (message \"Seq #%d\" i))))
+      (lambda (v i) (message \"round %s, return: %s\" i v))
+      (lambda (err) (message \"failed with error: %s\" err)))
+
+    ;; Same as above
+    (pdd-interval-task 1 3
+      (lambda (i return)
+        (if (> (random 10) 6)
+            (funcall return 666)
+          (message \"Seq #%d\" i)))
+      :done (lambda (v i) (message \"round %s, return: %s\" i v))
+      :fail (lambda (err) (message \"failed with error: %s\" err)))
+
+    ;; Cancel the task
+    (setq task1 (pdd-interval-task ...))
+    (pdd-signal task1 \\='abort)"
+  (declare (indent 2))
+  (pdd-with-new-task
+   (let* ((n 0) (task it) (timer nil)
+          (return-fn (lambda (&optional v rejected-p)
+                       (if (timerp timer)
+                           (cancel-timer timer))
+                       (if rejected-p
+                           (pdd-reject task v)
+                         (pdd-resolve task v n)))))
+     :signal (lambda () (funcall return-fn 'abort t))
+     (when init
+       (run-at-time 0 nil (lambda () (pdd-funcall init (list timer)))))
+     (setq timer
+           (run-at-time
+            0 secs (lambda ()
+                     (condition-case err
+                         (if (or (and (numberp count)
+                                      (>= n count))
+                                 (and (functionp count)
+                                      (not (pdd-funcall count (list (1+ n))))))
+                             (funcall return-fn)
+                           (cl-incf n)
+                           (pdd-funcall func (list n return-fn timer)))
+                       (error (funcall return-fn err t))))))
+     (when (or done fail)
+       (setq it (pdd-then it
+                  (let ((args (pdd-function-arglist (or done #'identity))))
+                    `(lambda (,@args)
+                       (unwind-protect
+                           (,(or done #'identity) ,@args)
+                         (ignore-errors (pdd-funcall ,fine (list ,timer))))))
+                  (lambda (reason)
+                    (unwind-protect
+                        (if fail
+                            (funcall fail reason)
+                          (if (consp reason)
+                              (throw (car reason) (cdr reason))
+                            (throw 'user-error reason)))
+                      (ignore-errors (pdd-funcall fine (list timer))))))))
+     (puthash timer task pdd-task--timer-pool))))
+
+;; Async/Await
+
+(defmacro pdd-let* (bindings &rest body)
+  "Enhanced let* with multi-task await support in BINDINGS and BODY."
+  (declare (indent 1))
+  (let ((awaits))
+    (cl-labels
+        ((subst-await (tree)
+           (cond ((atom tree) tree)
+                 ((eq (car tree) 'await)
+                  (let ((sym (gensym "--res-")))
+                    (push (cons sym
+                                (if (cddr tree)
+                                    `(pdd-all ,@(cdr tree))
+                                  (cadr tree)))
+                          awaits)
+                    sym))
+                 (t (cons (subst-await (car tree)) (subst-await (cdr tree))))))
+         (contains-await (form)
+           (if (atom form)
+               (if (string-prefix-p "--res-" (format "%s" form)) form)
+             (cons (contains-await (car form))
+                   (contains-await (cdr form)))))
+         (process-await (res-vars forms)
+           (if (null res-vars)
+               forms
+             (let* ((var (pop res-vars))
+                    (task (alist-get var awaits)))
+               (process-await
+                res-vars
+                `(pdd-then ,task
+                   (lambda (,var) ,forms)
+                   (lambda (err) (signal 'user-error err)))))))
+         (process-binding (bindings forms)
+           (if (null bindings)
+               forms
+             (let ((binding (pop bindings)))
+               (if-let* ((res-vars (contains-await binding)))
+                   (setq forms (process-await res-vars `(let (,binding) ,forms)))
+                 (cond ((eq (car forms) 'let*)
+                        (setq forms `(let* (,binding ,@(cadr forms)) ,@(cddr forms))))
+                       ((eq (car forms) 'pdd-then)
+                        (setq forms `(let* (,binding) ,forms)))
+                       (t
+                        (setq forms `(let* (,binding ,@forms))))))
+               (process-binding bindings forms)))))
+      (let* ((forms (cons `(_last (progn ,@body)) (reverse bindings)))
+             (subst-forms (subst-await forms)))
+        `(let ((pdd-default-sync nil))
+           ,(process-binding subst-forms nil))))))
 
 ;; Cookie
 
@@ -602,63 +1200,69 @@ If JAR is nil, operates on the default cookie jar."
 ;; Request
 
 (defclass pdd-request ()
-  ((url        :initarg :url      :type string)
-   (method     :initarg :method   :type (or symbol string) :initform nil)
-   (params     :initarg :params   :type (or string list)   :initform nil)
-   (headers    :initarg :headers  :type list               :initform nil)
-   (data       :initarg :data     :type (or function string list) :initform nil)
-   (datas      :initform nil      :type (or string null))
-   (binaryp    :initform nil      :type boolean)
-   (resp       :initarg :resp     :type (or function null) :initform nil)
-   (timeout    :initarg :timeout  :type (or number null)   :initform nil)
-   (retry      :initarg :retry    :type (or number null)   :initform nil)
-   (init       :initarg :init     :type (or function null) :initform nil)
-   (filter     :initarg :filter   :type (or function null) :initform nil)
-   (done       :initarg :done     :type (or function null) :initform nil)
-   (fail       :initarg :fail     :type (or function null) :initform nil)
-   (fine       :initarg :fine     :type (or function null) :initform nil)
+  ((url        :initarg :url         :type string)
+   (method     :initarg :method      :type (or symbol string) :initform nil)
+   (params     :initarg :params      :type (or string list)   :initform nil)
+   (headers    :initarg :headers     :type list               :initform nil)
+   (data       :initarg :data        :type (or function string list) :initform nil)
+   (datas      :initform nil         :type (or string null))
+   (binaryp    :initform nil         :type boolean)
+   (resp       :initarg :resp        :type (or function null) :initform nil)
+   (timeout    :initarg :timeout     :type (or number null)   :initform nil)
+   (retry      :initarg :retry       :type (or number null)   :initform nil)
+   (init       :initarg :init        :type (or function null) :initform nil)
+   (filter     :initarg :filter      :type (or function null) :initform nil)
+   (done       :initarg :done        :type (or function null) :initform nil)
+   (fail       :initarg :fail        :type (or function null) :initform nil)
+   (fine       :initarg :fine        :type (or function null) :initform nil)
    (sync       :initarg :sync)
-   (buffer     :initarg :buffer   :initform nil)
-   (backend    :initarg :backend  :type (or pdd-http-backend null))
-   (cookie-jar :initarg :cookie-jar :type (or pdd-cookie-jar function null) :initform nil)
-   (proxy      :initarg :proxy    :type (or string list null) :initform nil))
+   (buffer     :initarg :buffer      :initform nil)
+   (backend    :initarg :backend     :type (or pdd-http-backend null))
+   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null) :initform nil)
+   (proxy      :initarg :proxy       :type (or string list null) :initform nil)
+   (process    :initarg :process     :initform nil)
+   (abort-flag :initarg :abort-flag  :initform nil)
+   (task       :initarg :task        :initform nil))
   "Abstract base class for HTTP request configs.")
 
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
   "Construct the :done callback handler for REQUEST."
-  (with-slots (done fail fine buffer backend) request
-    (let ((args (cl-loop for arg in
-                         (if (or (null done) (equal (func-arity done) '(0 . many)))
-                             '(a1)
-                           (help-function-arglist done))
-                         until (memq arg '(&rest &optional &key))
-                         collect arg)))
+  (with-slots (url done buffer task) request
+    (let* ((args (pdd-function-arglist done))
+           (request-ref request) (original-done done)
+           (captured-buffer buffer) (captured-url url))
       (setf done
             `(lambda ,args
                (pdd-log 'done "enter")
                (unwind-protect
                    (condition-case err1
                        (with-current-buffer
-                           (if (and (buffer-live-p ,buffer) (cl-plusp ,(length args)))
-                               ,buffer
+                           (if (and (buffer-live-p ,captured-buffer) (cl-plusp ,(length args)))
+                               ,captured-buffer
                              (current-buffer))
                          (prog1
-                             (,(or done 'identity) ,@args)
+                             (let ((result (,(or original-done 'identity) ,@args))
+                                   (task (oref ,request-ref task)))
+                               (if (not (pdd-task-p task))
+                                   result
+                                 (pdd-log 'task "TASK DONE:  %s" ,captured-url)
+                                 (pdd-resolve task result ,request-ref)))
                            (pdd-log 'done "finished.")))
-                     (error (setq pdd-abort-flag 'done)
+                     (error (setf (oref ,request-ref abort-flag) 'done)
                             (pdd-log 'done "error. %s" err1)
-                            (funcall ,fail err1)))
-                 (ignore-errors (pdd-funcall ,fine (list ,request)))))))))
+                            (funcall (oref ,request-ref fail) err1)))
+                 (ignore-errors
+                   (pdd-funcall (oref ,request-ref fine) (list ,request-ref)))))))))
 
 (cl-defmethod pdd-transform-req-filter ((request pdd-request))
   "Construct the :filter callback handler for REQUEST."
-  (with-slots (filter fail) request
-    (when filter
+  (with-slots (filter fail abort-flag) request
+    (when-let* ((filter1 filter))
       (setf filter
-            (let ((filter1 filter))
-              (lambda ()
-                (if pdd-abort-flag
-                    (pdd-log 'filter "skip (aborted).")
+            (lambda ()
+              (if abort-flag
+                  (pdd-log 'filter "skip filter (aborted).")
+                (with-slots (abort-flag fail) request
                   (pdd-log 'filter "enter")
                   (condition-case err1
                       (if (zerop (length (help-function-arglist filter1)))
@@ -670,51 +1274,53 @@ If JAR is nil, operates on the default cookie jar."
                                (process (get-buffer-process buffer)))
                           (pdd-log 'filter "headers: %s" headers)
                           (pdd-funcall filter1 (list headers process request))))
-                    (error
-                     (pdd-log 'filter "fail: %s" err1)
-                     (setq pdd-abort-flag 'filter)
-                     (funcall fail err1))))))))))
+                    (error (pdd-log 'filter "fail: %s" err1)
+                           (setf abort-flag 'filter)
+                           (funcall fail err1))))))))))
 
 (cl-defmethod pdd-transform-req-fail ((request pdd-request))
   "Construct the :fail callback handler for REQUEST."
-  (with-slots (retry fail fine backend) request
+  (with-slots (retry fail fine abort-flag backend) request
     (setf fail
-          (let ((fail1 (or fail pdd-default-error-handler)))
+          (let ((fail1 fail)
+                (fail-default pdd-default-error-handler)
+                (context (pdd--capture-dynamic-context)))
             (lambda (err)
-              (pdd-log 'fail "enter: %s | %s" err (or fail1 'None))
-              ;; retry
-              (if (and (cl-plusp retry) (funcall pdd-retry-condition err))
-                  (progn
-                    (if pdd-debug
-                        (pdd-log 'fail "retrying (remains %d times)..." retry)
-                      (let ((inhibit-message t))
-                        (message "(%d) retring for %s..." retry (cadr err))))
-                    (cl-decf retry)
-                    (funcall #'pdd backend request))
-                ;; really fail now
-                (pdd-log 'fail "really, it's fail...")
-                (unwind-protect
-                    (cl-flet ((show-error (obj)
-                                (when (eq (car err) 'error) ; avoid 'peculiar error'
-                                  (setf (car err) 'user-error))
-                                (message
-                                 "%s%s"
-                                 (if pdd-abort-flag (format "[%s] " pdd-abort-flag) "")
-                                 (if (get (car obj) 'error-conditions)
-                                     (error-message-string obj)
-                                   (mapconcat (lambda (e) (format "%s" e)) obj ", ")))))
+              (unless abort-flag
+                (pdd-log 'fail "%s | %s" err (or fail1 'None))
+                ;; retry
+                (if (and (cl-plusp retry) (funcall pdd-retry-condition err))
+                    (progn
+                      (if pdd-debug
+                          (pdd-log 'fail "retrying (remains %d times)..." retry)
+                        (let ((inhibit-message t))
+                          (message "(%d) retring for %s..." retry (cadr err))))
+                      (cl-decf retry)
+                      (pdd backend request))
+                  ;; really fail
+                  (unwind-protect
                       (condition-case err1
-                          (if fail1 ; ensure no error in this phase
-                              (progn
-                                (pdd-log 'fail "display error with :fail.")
-                                (pdd-funcall fail1 (list (cadr err) (car-safe (cddr err)) err request)))
-                            (pdd-log 'fail "no :fail, just show it.")
-                            (show-error err))
-                        (error
-                         (pdd-log 'fail "oooop, error occurs when display error.")
-                         (show-error err1))))
-                  ;; finally
-                  (ignore-errors (pdd-funcall fine (list request))))))))))
+                          (with-slots (url task) request
+                            (cond ; error -> :fail -> task chain -> on-rejected | default handler
+                             ((pdd-task-p task)
+                              (when fail1
+                                (pdd-log 'fail "calling user :fail callback")
+                                (aset task 7 t) ; set inhibit-default-rejection-p flag
+                                (ignore-errors
+                                  (pdd-funcall fail1 (list (cadr err) (car-safe (cddr err)) err request))))
+                              (pdd-log 'fail "reject error to task")
+                              (pdd-log 'task "TASK FAIL:  %s" url)
+                              (pdd-reject task err context))
+                             (fail1
+                              (pdd-log 'fail "display error with: fail callback.")
+                              (pdd-funcall fail1 (list (cadr err) (car-safe (cddr err)) err request)))
+                             (fail-default
+                              (pdd-log 'fail "display error with: default error handler")
+                              (pdd-funcall fail-default (list err request)))))
+                        (error (pdd-log 'fail "oooop, error occurs when display error.")
+                               (message "Oooop, error in error handling: %s" err1)))
+                    ;; finally
+                    (ignore-errors (pdd-funcall fine (list request)))))))))))
 
 (cl-defmethod pdd-transform-req-headers ((request pdd-request))
   "Transform headers with stringfy and abbrev replacement in REQUEST."
@@ -770,18 +1376,18 @@ If JAR is nil, operates on the default cookie jar."
               (format "%s" (pdd-funcall data (list headers)))
             (if (atom data) ; Never modify the Content-Type when data is atom/string
                 (and data (format "%s" data))
-              (let ((ct (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)))
+              (let ((ct (alist-get "Content-Type" headers nil nil #'pdd-string-iequal)))
                 (cond ((string-match-p "/json" (or ct ""))
                        (setf binaryp t)
                        (encode-coding-string (pdd-object-to-string 'json data) 'utf-8))
                       ((cl-some (lambda (x) (consp (cdr x))) data)
                        (setf binaryp t)
-                       (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
+                       (setf (alist-get "Content-Type" headers nil nil #'pdd-string-iequal)
                              (concat "multipart/form-data; boundary=" pdd-multipart-boundary))
                        (pdd-format-formdata data))
                       (t
                        (unless ct
-                         (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
+                         (setf (alist-get "Content-Type" headers nil nil #'pdd-string-iequal)
                                "application/x-www-form-urlencoded"))
                        (pdd-object-to-string 'query data)))))))))
 
@@ -815,15 +1421,10 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod pdd-transform-req-finally ((request pdd-request))
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
-    (unless (assoc "User-Agent" headers #'string-equal-ignore-case)
+    (unless (assoc "User-Agent" headers #'pdd-string-iequal)
       (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
-
-(defvar pdd-default-headers nil)
-(defvar pdd-default-data nil)
-(defvar pdd-default-done nil)
-(defvar pdd-default-filter nil)
 
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
@@ -842,14 +1443,20 @@ If JAR is nil, operates on the default cookie jar."
     (unless retry (setf retry pdd-default-retry))
     ;; init other slots
     (unless (slot-boundp request 'sync)
-      (setf sync (if pdd-default-sync
-                     (if (eq pdd-default-sync :sync) t nil)
-                   (if done nil :sync))))
+      (setf sync (if (eq pdd-default-sync 'unset)
+                     (if done nil t) pdd-default-sync)))
     (unless method (setf method (if data 'post 'get)))
     (unless buffer (setf buffer (current-buffer)))
+    ;; create task for asynchronous request
+    (unless sync
+      (setf task
+            (pdd-with-new-task
+             :signal (lambda ()
+                       (pdd-log 'signal "cancel: %s" url)
+                       (unless abort-flag (setf abort-flag 'cancel))))))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)
-             do (pdd-log 'req (help-fns-function-name transformer))
+             do (pdd-log 'req (symbol-name transformer))
              do (funcall transformer request))))
 
 (cl-defgeneric pdd-make-request (backend &rest _arg)
@@ -919,15 +1526,15 @@ If JAR is nil, operates on the default cookie jar."
               (pdd-funcall resp (list pdd-resp-body pdd-resp-headers))
             (let* ((ct (alist-get 'content-type pdd-resp-headers))
                    (type (cond ((string-match-p "/json" ct) 'json)
-                               (t (intern (car (string-split ct "[; ]")))))))
+                               (t (intern (car (split-string ct "[; ]")))))))
               (pdd-string-to-object type pdd-resp-body))))))
 
 (cl-defmethod pdd-transform-response (request)
   "Run all response transformers for REQUEST to get the results."
-  (if pdd-abort-flag
-      (pdd-log 'resp "skip (aborted).")
+  (if (oref request abort-flag)
+      (pdd-log 'resp "skip response (aborted).")
     (cl-loop for transformer in (pdd-response-transformers (oref request backend))
-             do (pdd-log 'resp (help-fns-function-name transformer))
+             do (pdd-log 'resp (symbol-name transformer))
              do (funcall transformer request))
     (list pdd-resp-body pdd-resp-headers
           pdd-resp-status pdd-resp-version request)))
@@ -1018,11 +1625,14 @@ ARGS should a request instances or keywords to build the request."
   (let ((request (if (cl-typep (car args) 'pdd-request)
                      (car args)
                    (apply #'pdd-make-request backend args))))
-    (pdd-log 'req "pdd:around...")
-    ;; User's :init callback is the final chance to change request
-    (with-slots (init) request (if init (pdd-funcall init (list request))))
-    ;; derived to specified backend to deal with the real request
-    (cl-call-next-method backend :request request)))
+    (with-slots (sync init task process) request
+      (pdd-log 'req "pdd:around...")
+      ;; user's :init callback is the final chance to change request
+      (when init
+        (pdd-funcall init (list request)))
+      ;; derived to specified backend to deal with the real request
+      (let ((result (cl-call-next-method backend :request request)))
+        (if sync result (setf process result) task)))))
 
 (cl-defgeneric pdd-request-transformers (_backend)
   "Return the request transformers will be used by BACKEND."
@@ -1075,19 +1685,20 @@ ARGS should a request instances or keywords to build the request."
                   (if (and user pass) (format "%s:%s@" user pass) "")
                   host port))))))
 
-(cl-defmethod pdd-transform-error ((_ pdd-url-backend) status)
-  "Extract error object from callback STATUS."
-  (cond ((null status)
-         (setq pdd-abort-flag 'conn)
-         `(http "Maybe something wrong with network" 400))
-        ((or (null url-http-end-of-headers) (= 1 (point-max)))
-         (setq pdd-abort-flag 'conn)
-         `(http "Response unusual empty content" 417))
-        ((plist-get status :error)
-         (setq pdd-abort-flag 'resp)
-         (let* ((err (plist-get status :error))
-                (code (caddr err)))
-           `(,(car err) ,(pdd-http-code-text code) ,code)))))
+(cl-defmethod pdd-transform-error ((_ pdd-url-backend) (request pdd-request) status)
+  "Extract error object from callback STATUS for REQUEST."
+  (with-slots (abort-flag) request
+    (cond ((null status)
+           (setf abort-flag 'conn)
+           `(http "Maybe something wrong with network" 400))
+          ((or (null url-http-end-of-headers) (= 1 (point-max)))
+           (setf abort-flag 'conn)
+           `(http "Response unusual empty content" 417))
+          ((plist-get status :error)
+           (setf abort-flag 'resp)
+           (let* ((err (plist-get status :error))
+                  (code (caddr err)))
+             `(,(car err) ,(pdd-http-code-text code) ,code))))))
 
 (defun pdd-url-http-extra-filter (beg end len)
   "Call `pdd-url-extra-filter'.  BEG, END and LEN see `after-change-functions'."
@@ -1101,7 +1712,7 @@ ARGS should a request instances or keywords to build the request."
 
 (cl-defmethod pdd ((backend pdd-url-backend) &key request)
   "Send REQUEST with url.el as BACKEND."
-  (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
+  (with-slots (url method headers datas binaryp resp filter done fail timeout sync abort-flag) request
     ;; setup proxy
     (let* ((proxy (pdd-proxy-vars backend request))
            (socks-server (if proxy nil socks-server))
@@ -1137,8 +1748,8 @@ ARGS should a request instances or keywords to build the request."
         ;; start url-retrive
         (let* ((url-request-method (string-to-unibyte (upcase (format "%s" method))))
                (url-request-data datas)
-               (url-user-agent (alist-get "user-agent" headers nil nil #'string-equal-ignore-case))
-               (url-request-extra-headers (assoc-delete-all "user-agent" headers #'string-equal-ignore-case))
+               (url-user-agent (alist-get "user-agent" headers nil nil #'pdd-string-iequal))
+               (url-request-extra-headers (assoc-delete-all "user-agent" headers #'pdd-string-iequal))
                (url-mime-encoding-string "identity")
                timer buffer-data data-buffer
                (callback (lambda (status)
@@ -1146,10 +1757,10 @@ ARGS should a request instances or keywords to build the request."
                            (ignore-errors (cancel-timer timer))
                            (setq data-buffer (current-buffer))
                            (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
-                           (if pdd-abort-flag
+                           (if abort-flag
                                (pdd-log 'url-backend "skip done (aborted).")
                              (unwind-protect
-                                 (if-let* ((err (pdd-transform-error backend status)))
+                                 (if-let* ((err (pdd-transform-error backend request status)))
                                      (progn (pdd-log 'url-backend "before fail")
                                             (funcall fail err))
                                    (pdd-log 'url-backend "before done")
@@ -1198,9 +1809,7 @@ ARGS should a request instances or keywords to build the request."
                     (unless data-buffer
 		              (throw 'pdd-done 'exception))))
                 (with-local-quit
-                  (while (and (process-live-p process)
-                              (not (buffer-local-value 'pdd-abort-flag proc-buffer))
-                              (not data-buffer))
+                  (while (and (process-live-p process) (not abort-flag) (not data-buffer))
                     (accept-process-output nil 0.05)))
                 buffer-data)
             process))))))
@@ -1242,7 +1851,7 @@ ARGS should a request instances or keywords to build the request."
           ,@(when (and user pass)
               `("--proxy-user" ,(format "%s:%s" user pass))))))))
 
-(cl-defmethod pdd-transform-error ((_ pdd-curl-backend) error)
+(cl-defmethod pdd-transform-error ((_ pdd-curl-backend) (_ pdd-request) error)
   "Hacky, but try to unify the ERROR data format with url.el."
   (when (and (consp error) (memq (car error) '(plz-http-error plz-curl-error)))
     (setq error (caddr error)))
@@ -1265,9 +1874,8 @@ Or switch http backend to `pdd-url-backend' instead:\n
 
 (cl-defmethod pdd ((backend pdd-curl-backend) &key request)
   "Send REQUEST with plz as BACKEND."
-  (with-slots (url method headers datas binaryp resp filter done fail timeout sync) request
+  (with-slots (url method headers datas binaryp resp filter done fail timeout sync abort-flag) request
     (let* ((tag (eieio-object-class backend))
-           (abort-flag) ; used to catch abort action from :filter
            (proxy (pdd-proxy-vars backend request))
            (plz-curl-default-args
             (if proxy (append proxy plz-curl-default-args) plz-curl-default-args))
@@ -1282,9 +1890,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
                       (save-restriction
                         ;; it's better to provide a narrowed buffer to :filter
                         (narrow-to-region (point) (point-max))
-                        (unwind-protect
-                            (funcall filter)
-                          (setq abort-flag pdd-abort-flag)))))))))
+                        (funcall filter))))))))
            (results (lambda ()
                       (pdd-log tag "before resp")
                       (pdd-transform-response request))))
@@ -1313,7 +1919,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
                   (pdd-funcall done res)))
             (error
              (pdd-log tag "before fail")
-             (funcall fail (pdd-transform-error backend err))))
+             (funcall fail (pdd-transform-error backend request err))))
         ;; async
         (plz method url
           :headers headers
@@ -1323,13 +1929,13 @@ Or switch http backend to `pdd-url-backend' instead:\n
           :as results
           :filter filter-fn
           :then (lambda (res)
-                  (if pdd-abort-flag
+                  (if abort-flag
                       (pdd-log tag "skip done (aborted).")
                     (pdd-log tag "before done")
                     (pdd-funcall done res)))
           :else (lambda (err)
                   (pdd-log tag "before fail")
-                  (funcall fail (pdd-transform-error backend err)))
+                  (funcall fail (pdd-transform-error backend request err)))
           :timeout timeout)))))
 
 

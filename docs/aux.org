@@ -1,0 +1,17 @@
+#+STARTUP: nofold noindent showstars
+
+** Kind display when edebug
+
+#+begin_src emacs-lisp
+  (cl-defmethod cl-print-object ((obj vector) stream)
+    (if (pdd-task-p obj)
+        (pdd-with-record (s vs rs cbs sig) obj
+          (princ (format "#<pdd-task %s %s %d %d>"
+                         s (or vs rs)
+                         (if cbs (length cbs))
+                         (if sig 0))
+                 stream))
+      (cl-call-next-method)))
+
+  ;; (prin1-to-string (pdd-resolve 2))
+#+end_src

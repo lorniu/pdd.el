@@ -131,6 +131,14 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
                           by #'cddr unless (eq k :created-at) append (list k v))
                  '(:name "id" :value "a3fWa" :expires (22055 16000) :max-age 2592000 :secure t :path "/" :domain "example.com"))))
 
+(ert-deftest pdd-test-task-then ()
+  (should (= (let ((t1 (pdd-task)))
+               (pdd-task-then t1
+                              (lambda (v) (+ v 1))
+                              (lambda (e) e))
+               (pdd-task-resolve t1 41))
+             42)))
+
 
 ;;; Request Tests
 

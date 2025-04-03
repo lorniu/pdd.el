@@ -1,16 +1,18 @@
 # HTTP Library for Emacs
 
-A versatile HTTP library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
+An awesome HTTP library that provides a unified interface making http requests across multiple backend implementations easily. It is designed for simplicity, flexibility and cross-platform compatibility.
 
  - Choose between built-in `url.el` or high-performance `curl` backends. It gracefully falls back to `url.el` when `curl` is unavailable without requiring code changes.
  - Rich feature set including multipart uploads, streaming support, cookie-jar support, proxy support, intercepters support, automatic retry strategies, and smart data conversion. Enhances `url.el` to support all these capabilities and work well enough.
+ - Provide a `Promide/A+` and `async/await` implementation and make the syntax of concurrent requests elegant and simple.
  - Minimalist yet intuitive API that works consistently across backends. Features like variadic callbacks and header abbreviation rules help you accomplish more with less code.
- - Extensible architecture makes it easy to add new backends.
+ - Extensible architecture makes it easy to add new features, even add new backends.
 
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
 - [How to use proxy](docs/proxy.md)
 - [How to manage cookies](docs/cookie-jar.md)
+- [The power of Promise and Async/Await](docs/promise-and-await.md)
 - [Compare with plz.el](#Comparison)
 
 Why this name?
@@ -65,6 +67,7 @@ And try to send requests like this:
   :method 'post)
 
 ;; If :done is present and :sync t is absent, the request will be asynchronous!
+;; Perhaps sometimes you should specify :sync nil to make it more explicit.
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (message "%s" res)))
@@ -78,7 +81,7 @@ And try to send requests like this:
 ;; Use `pdd-default-error-handler' to catch error when :fail is absent
 ;; Set its value globally, or just dynamically bind it with let
 (let ((pdd-default-error-handler
-       (lambda (_ code) (message "Crying for %s..." code))))
+       (lambda (err) (message "Crying for %s..." (caddr err)))))
   (pdd "https://httpbin.org/post-error"
     :data '(("key" . "value"))
     :done (lambda (res) (print res))))
@@ -188,6 +191,32 @@ Of course, there are tricks that can make things easier:
   (pdd "https://httpbin.org/uuid" :retry 1) ; override the default variables
   (pdd "https://httpbin.org/user-agent" :headers nil))
 ```
+
+When handling multiple asynchronous requests, you may encounter **callback hell**, a tangled mess of nested callbacks. However, by using `pdd-task` and `pdd-let*/await`, things become much easier ([more examples](docs/promise-and-await.md)):
+``` emacs-lisp
+;; For example, request for ip and uuid, then use the results to send new request:
+(pdd "https://httpbin.org/ip"
+  :done (lambda (r1)
+          (pdd "https://httpbin.org/uuid"
+            :done (lambda (r2)
+                    (pdd "https://httpbin.org/anything"
+                      :data `((r1 . ,(alist-get 'origin r1))
+                              (r2 . ,(alist-get 'uuid r2)))
+                      :done (lambda (r3)
+                              (message "> Got: %s"
+                                       (alist-get 'form r3))))))))
+
+;; You can just simplied as:
+(pdd-let* ((r1 (await (pdd "https://httpbin.org/ip")
+                      (pdd "https://httpbin.org/uuid")))
+           (r2 (await (pdd "https://httpbin.org/anything"
+                        :data `((ip . ,(alist-get 'origin (car r1)))
+                                (id . ,(alist-get 'uuid (cadr r1))))))))
+  (message "> Got: %s" (alist-get 'form r2)))
+```
+
+You will see, it's very similar to C#/TypeScript, even more concise.
+
 ## Examples
 
 Download file with progress bar display:
@@ -267,24 +296,25 @@ Returns:
 
 ## Comparison
 
-| Feature                   | pdd.el                           | plz.el                  |
-|---------------------------|----------------------------------|-------------------------|
-| **Backend Support**       | Multiple (url.el + curl via plz) | curl only               |
-| **Fallback Mechanism**    | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
-| **Multipart Uploads**     | ✅ Support                       | ❌ No                   |
-| **Encoding Handling**     | ✅ Auto detection and decoding   | ❌ Manual decode        |
-| **Type Conversion**       | ✅ Auto conversion               | ❌️ Manual convert       |
-| **Retry Logic**           | ✅ Configurable                  | ❌ None                 |
-| **Req/Resp Interceptors** | ✅ Support                       | ❌ None                 |
-| **Proxy support**         | ✅ Dynamic and easy              | ⚠️ Manual               |
-| **Auto Cookies manage**   | ✅ Support with cookie-jar       | ❌ No                   |
-| **Header Abbreviations**  | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
-| **Variadic Callbacks**    | ✅ Yes, make code cleaner        | ❌ No                   |
-| **Streaming Support**     | ✅ Full                          | ✅ Full                 |
-| **Error Handling**        | ✅ Robust                        | ✅ Robust               |
-| **Sync/Async Modes**      | ✅ Both supported                | ✅ Both supported       |
-| **Customization**         | ✅ Extensive                     | ⚠️ Limited              |
-| **Dependencies**          | None (url.el built-in)           | Requires curl binary    |
+| Feature                     | pdd.el                           | plz.el                  |
+|-----------------------------|----------------------------------|-------------------------|
+| **Backend Support**         | Multiple (url.el + curl via plz) | curl only               |
+| **Fallback Mechanism**      | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
+| **Multipart Uploads**       | ✅ Support                       | ❌ No                   |
+| **Encoding Handling**       | ✅ Auto detection and decoding   | ❌ Manual decode        |
+| **Type Conversion**         | ✅ Auto conversion               | ❌️ Manual convert       |
+| **Retry Logic**             | ✅ Configurable                  | ❌ None                 |
+| **Req/Resp Interceptors**   | ✅ Support                       | ❌ None                 |
+| **Proxy support**           | ✅ Dynamic and easy              | ⚠️ Manual                |
+| **Auto Cookies manage**     | ✅ Support with cookie-jar       | ❌ No                   |
+| **Promise and Async/Await** | ✅ Support                       | ❌ None                 |
+| **Concurrent Control**      | ✅ Support                       | ❌ None                 |
+| **Header Abbreviations**    | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
+| **Variadic Callbacks**      | ✅ Yes, make code cleaner        | ❌ No                   |
+| **Streaming Support**       | ✅ Full                          | ✅ Full                 |
+| **Error Handling**          | ✅ Robust                        | ✅ Robust               |
+| **Customization**           | ✅ Extensive                     | ⚠️ Limited               |
+| **Dependencies**            | None (url.el built-in)           | Requires curl binary    |
 
 ## Miscellaneous
 
