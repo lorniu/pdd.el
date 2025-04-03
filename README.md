@@ -11,6 +11,7 @@ Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
 - [How to use proxy](docs/proxy.md)
 - [How to manage cookies](docs/cookie-jar.md)
+- [The power of Promise and Async/Await](docs/promise-and-await.md)
 - [Compare with plz.el](#Comparison)
 
 Why this name?
