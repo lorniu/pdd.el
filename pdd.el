@@ -55,7 +55,6 @@
 (require 'cl-lib)
 (require 'eieio)
 (require 'help)
-(require 'json)
 (require 'url-http)
 
 (defgroup pdd nil
@@ -93,37 +92,46 @@ rest arguments."
              else do (push el sub)
              finally (funcall display sub))))
 
+(defconst pdd-common-cache (make-hash-table :test 'equal)
+  "Global hash table for caching computed values.")
+
+(defmacro pdd-with-common-cache (key &rest body)
+  "Execute BODY and cache its result under KEY."
+  (declare (indent 1))
+  (cl-with-gensyms (keysmb valsmb cache)
+    `(let* ((,keysmb ,key)
+            (,cache (gethash ,keysmb pdd-common-cache 'no-x-cache)))
+       (if (not (eq ,cache 'no-x-cache))
+           ,cache
+         (let ((,valsmb (progn ,@body)))
+           (puthash ,keysmb ,valsmb pdd-common-cache)
+           ,valsmb)))))
+
 (defun pdd-detect-charset (content-type)
   "Detect charset from CONTENT-TYPE header."
   (when content-type
-    (let ((case-fold-search t))
-      (if (string-match "charset=\\s-*\\([^; \t\n\r]+\\)" (format "%s" content-type))
-          (intern (downcase (match-string 1 content-type)))
+    (pdd-with-common-cache (cons 'charset content-type)
+      (setq content-type (downcase (format "%s" content-type)))
+      (if (string-match "charset=\\s-*\\([^; \t\n\r]+\\)" content-type)
+          (intern (match-string 1 content-type))
         'utf-8))))
 
 (defun pdd-binary-type-p (content-type)
   "Check if current CONTENT-TYPE represents binary data."
   (when content-type
-    (cl-destructuring-bind (mime sub)
-        (string-split content-type "/" nil "[ \n\r\t]")
-      (not (or (equal mime "text")
-               (and (equal mime "application")
-                    (string-match-p
-                     (concat "json\\|xml\\|yaml\\|font"
-                             "\\|javascript\\|php\\|form-urlencoded")
-                     sub)))))))
-
-(defun pdd-format-params (alist)
-  "Convert an ALIST of parameters into a URL-encoded query string."
-  (mapconcat (lambda (arg)
-               (format "%s=%s"
-                       (url-hexify-string (format "%s" (car arg)))
-                       (url-hexify-string (format "%s" (or (cdr arg) 1)))))
-             (delq nil alist) "&"))
+    (pdd-with-common-cache (cons 'binaryp content-type)
+      (cl-destructuring-bind (mime sub)
+          (string-split content-type "/" nil "[ \n\r\t]")
+        (not (or (equal mime "text")
+                 (and (equal mime "application")
+                      (string-match-p
+                       (concat "json\\|xml\\|yaml\\|font"
+                               "\\|javascript\\|php\\|form-urlencoded")
+                       sub))))))))
 
 (defun pdd-gen-url-with-params (url params)
   "Generate a URL by appending PARAMS to URL with proper query string syntax."
-  (if-let* ((ps (if (consp params) (pdd-format-params params) params)))
+  (if-let* ((ps (if (consp params) (pdd-object-to-string 'query params) params)))
       (concat url (unless (string-match-p "[?&]$" url) (if (string-match-p "\\?" url) "&" "?")) ps)
     url))
 
@@ -193,6 +201,13 @@ Try to unhex the second part when URL-DECODE is not nil."
               (funcall (if url-decode #'url-unhex-string #'identity)
                        (string-trim v))))))
 
+(defun pdd-generic-parse-url (url)
+  "Return an URL-struct of the parts of URL with cache support."
+  (pdd-with-common-cache (list 'url-obj url)
+    (when (> (hash-table-count pdd-common-cache) 234)
+      (clrhash pdd-common-cache))
+    (url-generic-parse-url url)))
+
 (defun pdd-parse-proxy-url (proxy-url)
   "Parse PROXY-URL into a plist with :type, :host, :port, :user, :pass.
 
@@ -201,20 +216,21 @@ Supports formats like:
   https://example.com:8080
   socks5://user:pass@127.0.0.1:1080"
   (cl-assert (stringp proxy-url))
-  (let* ((url (url-generic-parse-url proxy-url))
-         (type (intern (url-type url)))
-         (host (url-host url))
-         (port (or (url-port url)
-                   (pcase type
-                     ('http 80)
-                     ('https 443)
-                     ('socks5 1080)
-                     (_ 8080))))
-         (user (url-user url))
-         (pass (url-password url)))
-    `( :type ,type :host ,host :port ,port
-       ,@(when user `(:user ,user))
-       ,@(when pass `(:pass ,pass)))))
+  (pdd-with-common-cache (cons 'parse-proxy-url proxy-url)
+    (let* ((url (url-generic-parse-url proxy-url))
+           (type (intern (url-type url)))
+           (host (url-host url))
+           (port (or (url-port url)
+                     (pcase type
+                       ('http 80)
+                       ('https 443)
+                       ('socks5 1080)
+                       (_ 8080))))
+           (user (url-user url))
+           (pass (url-password url)))
+      `( :type ,type :host ,host :port ,port
+         ,@(when user `(:user ,user))
+         ,@(when pass `(:pass ,pass))))))
 
 (defun pdd-parse-set-cookie (cookie-string &optional url-decode)
   "Parse HTTP Set-Cookie COOKIE-STRING with optional URL-DECODE.
@@ -278,8 +294,23 @@ Return a plist containing all cookie attributes."
 
 (cl-defgeneric pdd-string-to-object (_type string)
   "Convert STRING to an Elisp object based on the specified content TYPE."
-  (:method ((_ (eql 'json)) string) (json-read-from-string string))
+  (:method ((_ (eql 'json)) string)
+           (json-parse-string string :object-type 'alist))
   string)
+
+(cl-defgeneric pdd-object-to-string (type _object)
+  "Convert Elisp OBJECT to string based on the specified content TYPE."
+  (:method ((_ (eql 'json)) object)
+           ;; pity, json-serialize may fail in some cases
+           (require 'json)
+           (json-encode object))
+  (:method ((_ (eql 'query)) object)
+           (url-build-query-string
+            (cl-loop for item in object
+                     when (consp item)
+                     collect (if (car-safe (cdr item)) item
+                               (list (car item) (cdr item))))))
+  (user-error "No support for type %s" type))
 
 
 ;;; Core
@@ -695,12 +726,14 @@ If JAR is nil, operates on the default cookie jar."
            for item in headers for v = nil
            if (null item) do (ignore)
            if (setq v (and (symbolp item)
-                           (alist-get item pdd-header-rewrite-rules)))
+                           (pdd-with-common-cache (list 'rewrite item)
+                             (alist-get item pdd-header-rewrite-rules))))
            collect (funcall stringfy v)
            else if (setq v (and (consp item)
                                 (symbolp (car item))
                                 (or (null (cdr item)) (car-safe (cdr item)))
-                                (alist-get (car item) pdd-header-rewrite-rules)))
+                                (pdd-with-common-cache (list 'rewrite item)
+                                  (alist-get (car item) pdd-header-rewrite-rules))))
            collect (funcall stringfy (cons (car v)
                                            (if (cdr item)
                                                (apply #'format (cdr v) (cdr item))
@@ -715,7 +748,7 @@ If JAR is nil, operates on the default cookie jar."
       (when (functionp jar)
         (setq jar (pdd-funcall jar (list request))))
       (when (setf cookie-jar jar)
-        (let* ((url-obj (url-generic-parse-url url))
+        (let* ((url-obj (pdd-generic-parse-url url))
                (domain (url-host url-obj))
                (path (url-filename url-obj))
                (secure (equal "https" (url-type url-obj))))
@@ -740,16 +773,17 @@ If JAR is nil, operates on the default cookie jar."
               (let ((ct (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)))
                 (cond ((string-match-p "/json" (or ct ""))
                        (setf binaryp t)
-                       (encode-coding-string (json-encode data) 'utf-8))
+                       (encode-coding-string (pdd-object-to-string 'json data) 'utf-8))
                       ((cl-some (lambda (x) (consp (cdr x))) data)
                        (setf binaryp t)
                        (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
                              (concat "multipart/form-data; boundary=" pdd-multipart-boundary))
                        (pdd-format-formdata data))
                       (t
-                       (unless ct (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
-                                        "application/x-www-form-urlencoded"))
-                       (pdd-format-params data)))))))))
+                       (unless ct
+                         (setf (alist-get "Content-Type" headers nil nil #'string-equal-ignore-case)
+                               "application/x-www-form-urlencoded"))
+                       (pdd-object-to-string 'query data)))))))))
 
 (cl-defmethod pdd-transform-req-proxy ((request pdd-request))
   "Parse proxy setting for current REQUEST."
@@ -848,7 +882,7 @@ If JAR is nil, operates on the default cookie jar."
   "Save cookies from response to cookie jar for REQUEST."
   (with-slots (cookie-jar url) request
     (when (and cookie-jar pdd-resp-headers)
-      (cl-loop with domain = (or (url-host (url-generic-parse-url url)) "")
+      (cl-loop with domain = (or (url-host (pdd-generic-parse-url url)) "")
                for (k . v) in pdd-resp-headers
                if (eq k 'set-cookie) do
                (when-let* ((cookie (pdd-parse-set-cookie v t)))
@@ -867,9 +901,9 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod pdd-transform-resp-body (request)
   "Convert response body as `pdd-resp-body' for REQUEST."
   (with-slots (resp url) request
+    (setq pdd-resp-body (buffer-substring pdd-resp-mark (point-max)))
+    (pdd-log 'resp "raw: %s" pdd-resp-body)
     (setq pdd-resp-body
-          (buffer-substring pdd-resp-mark (point-max))
-          pdd-resp-body
           (if (functionp resp)
               (pdd-funcall resp (list pdd-resp-body pdd-resp-headers))
             (let* ((ct (alist-get 'content-type pdd-resp-headers))
