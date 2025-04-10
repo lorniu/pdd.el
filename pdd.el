@@ -343,7 +343,7 @@ function return such a url string proxy."
   "Default timetout seconds for the request."
   :type 'natnum)
 
-(defcustom pdd-max-retry 1
+(defcustom pdd-default-retry 1
   "Default retry times when request timeout."
   :type 'natnum)
 
@@ -820,21 +820,32 @@ If JAR is nil, operates on the default cookie jar."
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
 
+(defvar pdd-default-headers nil)
+(defvar pdd-default-data nil)
+(defvar pdd-default-done nil)
+(defvar pdd-default-filter nil)
+
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params data timeout retry sync done buffer backend) request
+  (with-slots (url method params headers data timeout retry sync done filter abort-flag buffer backend task) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when params
       (setf url (pdd-gen-url-with-params url params)))
+    ;; make such keywords can be dynamically bound
+    (unless headers (setf headers pdd-default-headers))
+    (unless data (setf data pdd-default-data))
+    (unless done (setf done pdd-default-done))
+    (unless filter (setf filter pdd-default-filter))
+    (unless timeout (setf timeout pdd-default-timeout))
+    (unless retry (setf retry pdd-default-retry))
+    ;; init other slots
     (unless (slot-boundp request 'sync)
       (setf sync (if pdd-default-sync
                      (if (eq pdd-default-sync :sync) t nil)
                    (if done nil :sync))))
     (unless method (setf method (if data 'post 'get)))
-    (unless timeout (setf timeout pdd-default-timeout))
-    (unless retry (setf retry pdd-max-retry))
     (unless buffer (setf buffer (current-buffer)))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)

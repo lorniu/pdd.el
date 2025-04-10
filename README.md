@@ -178,6 +178,15 @@ Of course, there are tricks that can make things easier:
 ;; It can be simplied as:
 (pdd 'print "https://httpbin.org/anything"
   :headers `(json ua-emacs (bear ,token) ("Accept" . "*/*")))
+
+;; The data/headers/done/filter/timeout/retry can be dynamically bound.
+;; In some cases, this is very convenient.
+(let ((pdd-default-sync nil)
+      (pdd-default-retry 3)
+      (pdd-default-headers `(json (bear ,token))))
+  (pdd "https://httpbin.org/ip")            ; use default headers/data if exists
+  (pdd "https://httpbin.org/uuid" :retry 1) ; override the default variables
+  (pdd "https://httpbin.org/user-agent" :headers nil))
 ```
 ## Examples
 
