@@ -1,12 +1,12 @@
 # HTTP library & Async Toolkit for Emacs
 
-This package provides a robust and elegant library for HTTP requests and asynchronous operations in Emacs. It featuring a **single, consistent API** that works identically across different backends, maximizing code portability and simplifying development.
+This package provides a robust and elegant library for HTTP requests and asynchronous operations in Emacs. It featuring a single, consistent API that works identically across different backends, maximizing code portability and simplifying development.
 
 Core Strengths:
 
-*   **Powerful Async Foundation:** Features a native, cancellable `Promise/A+` implementation and intuitive `async/await` syntax for clean, readable concurrent code. Includes integrated async helpers for `timers` and external `processes`.
 *   **Unified Backend:** Seamlessly utilize either the high-performance `curl` backend or the built-in `url.el`. It significantly enhances `url.el`, adding essential features like cookie-jar support, streaming support, multipart uploads, comprehensive proxy support (HTTP/SOCKS with auth-source integration), smart request/response data conversion and automatic retries.
-*   **Developer Friendly:** Offers a minimalist yet flexible API that is backend-agnostic, intuitive and easy to use. Features like variadic callbacks and header abbreviations can help you achieve more with less code.
+*   **Developer Friendly:** Offers a `minimalist yet flexible API` that is backend-agnostic, intuitive and easy to use. Features like variadic callbacks and header abbreviations can help you achieve more with less code.
+*   **Powerful Async Foundation:** Features a native, cancellable `Promise/A+` implementation and intuitive `async/await` syntax for clean, readable concurrent code. Includes integrated async helpers for `timers` and external `processes`. Also includes a `queue` mechanism for fine-grained concurrency control when making multiple asynchronous requests.
 *   **Highly Extensible:** Easily customize request/response flows using a clean transformer pipeline and object-oriented (EIEIO) backend design. This makes it easy to add new features or event entirely new backends.
 
 Why this name?
@@ -15,12 +15,11 @@ Why this name?
 
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
-- [How to use `proxy`](docs/proxy.md)
-- [How to manage `cookies`](docs/cookie-jar.md)
+- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Request with `queue`](docs/queue.md)
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
 - [Integrate `timers` with task and request](docs/task-timers.md)
 - [Integrate `make-process` with task and request](docs/task-process.md)
-- [Compare with plz.el](#Comparison)
+- [Compare this package with plz.el](#Comparison)  |  [Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
 
 ## Installation
 
@@ -219,6 +218,12 @@ When handling multiple asynchronous requests, you may encounter **callback hell*
 
 You will see, it's very similar to C#/TypeScript, even more concise.
 
+To control concurrent count of the requests, use `queue`:
+```emacs
+(setq queue1 (pdd-queue :limit 7))      ; create
+(pdd "https://httpbin.org/ip" :queue1)  ; request through queue1
+```
+
 ## Examples
 
 Download file with progress bar display:
@@ -254,6 +259,8 @@ Download file with progress bar display:
                             sync
                             timeout
                             retry
+                            proxy
+                            queue
                             &allow-other-keys)
   "Send HTTP request using the specified BACKEND.
 
@@ -291,6 +298,8 @@ Keyword Arguments:
   :SYNC    - Whether to execute synchronously (boolean)
   :TIMEOUT - Timeout in seconds
   :RETRY   - Number of retry attempts on timeout
+  :PROXY   - Proxy used by current http request
+  :QUEUE   - Semaphore object used to limit concurrency (async only)
 
 Returns:
   Response data in sync mode, task object in async mode.)
@@ -317,6 +326,9 @@ Returns:
 | **Error Handling**          | ✅ Robust                        | ✅ Robust               |
 | **Customization**           | ✅ Extensive                     | ⚠️ Limited              |
 | **Dependencies**            | None (url.el built-in)           | Requires curl binary    |
+
+I used to think that `plz` was much faster than `url.el`. But after testing ([Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)), I found out that I am completely wrong.
+In various situations, whether it's single concurrency or multiple concurrency, `plz` is at least 3 times as slow as `url.el`.
 
 ## Miscellaneous
 

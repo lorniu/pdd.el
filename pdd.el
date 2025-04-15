@@ -48,7 +48,9 @@
 ;;
 ;;    Features a native, cancellable `Promise/A+' implementation and intuitive
 ;;    `async/await' syntax for clean, readable concurrent code. Includes
-;;    integrated async helpers for timers and external processes.
+;;    integrated async helpers for timers and external processes. Also includes
+;;    a queue mechanism for fine-grained concurrency control when making multiple
+;;    asynchronous requests.
 ;;
 ;;  - Highly Extensible:
 ;;
@@ -439,6 +441,16 @@ The value can be either:
 
 This variable is used as a fallback when no cookie jar is explicitly
 provided in individual requests.")
+
+(defvar pdd-default-queue nil
+  "Default request queue used by asynchronous `pdd' calls.
+
+The value can be either:
+- A queue instance, or
+- A function that returns a queue instance, signature (&optional request)
+
+This variable is used as a fallback when no queue is explicitly provided
+in individual requests.")
 
 (defvar pdd-default-error-handler #'pdd--default-error-handler
   "The default error handler that display errors when they are not handled by user.
@@ -1493,6 +1505,59 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defgeneric pdd-proxy-vars (backend request)
   "Return proxy configs for REQUEST using BACKEND.")
 
+;; Queue
+
+(defclass pdd-queue ()
+  ((limit :initarg :limit
+          :initform 6
+          :type integer
+          :documentation "Max concurrent tasks")
+   (running :type list :initform nil
+            :documentation "Current running tasks")
+   (waiting :type list :initform nil
+            :documentation "Waiting list of (task . callback)")
+   (fine :initarg :fine :type (or function null) :initform nil
+         :documentation "Function to run when all tasks finished"))
+  :documentation "Represent a queue to limit concurrent operations.")
+
+(cl-defgeneric pdd-queue--signal-cancel-handler (queue task)
+  "Create a signal handler specifically for TASK in QUEUE."
+  (lambda (sig)
+    (with-slots (waiting) queue
+      (when (and (eq sig 'cancel) (assoc task waiting))
+        (setf waiting (cl-remove task waiting :key #'car))))))
+
+(cl-defgeneric pdd-queue-acquire (queue task callback)
+  "Attempt to acquire the QUEUE for TASK.
+Add to running or waiting list of QUEUE accordings.
+CALLBACK is the function to run when acquire success."
+  (with-slots (limit running waiting) queue
+    (pdd-log 'queue "Acquire attempt: limit=%d, running=%d, waiting=%d" limit (length running) (length waiting))
+    (if (< (length running) limit)
+        (progn (funcall callback)
+               (push task running)
+               (pdd-log 'queue "Add to running list, len=%s" (length running))
+               t)
+      (let ((handler (pdd-queue--signal-cancel-handler queue task))
+            (original-signal-fn (aref task 5)))
+        (setf waiting (nconc waiting (list (cons task callback))))
+        (aset task 5 (lambda (&optional signal-sym)
+                       (funcall handler signal-sym)
+                       (when original-signal-fn
+                         (pdd-funcall original-signal-fn (list signal-sym)))))
+        (pdd-log 'queue "Add to waiting list, len=%s" (length waiting))))))
+
+(cl-defgeneric pdd-queue-release (queue task)
+  "Release the TASK from QUEUE and run the next task from waiting list."
+  (with-slots (limit running waiting fine) queue
+    (pdd-log 'queue "Release attempt: limit=%d, running=%d, waiting=%d" limit (length running) (length waiting))
+    (setf running (cl-remove task running))
+    (when-let* ((item (pop waiting)))
+      (funcall (cdr item))
+      (push (car item) running))
+    (when (and fine (null running) (null waiting))
+      (pdd-funcall fine (list queue task)))))
+
 ;; Request
 
 (defclass pdd-request ()
@@ -1516,6 +1581,7 @@ If JAR is nil, operates on the default cookie jar."
    (backend    :initarg :backend     :type (or pdd-http-backend null))
    (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null) :initform nil)
    (proxy      :initarg :proxy       :type (or string list null) :initform nil)
+   (queue      :initarg :queue       :type (or pdd-queue null) :initform nil)
    (process    :initarg :process     :initform nil)
    (abort-flag :initarg :abort-flag  :initform nil)
    (task       :initarg :task        :initform nil))
@@ -1726,7 +1792,7 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data timeout retry sync done filter abort-flag buffer backend task) request
+  (with-slots (url method params headers data timeout retry sync init done filter abort-flag buffer backend task queue) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when params
@@ -1744,13 +1810,22 @@ If JAR is nil, operates on the default cookie jar."
                      (if done nil t) pdd-default-sync)))
     (unless method (setf method (if data 'post 'get)))
     (unless buffer (setf buffer (current-buffer)))
-    ;; create task for asynchronous request
     (unless sync
+      ;; create task for asynchronous request
       (setf task
             (pdd-with-new-task
              :signal (lambda ()
                        (pdd-log 'signal "cancel: %s" url)
-                       (unless abort-flag (setf abort-flag 'cancel))))))
+                       (unless abort-flag (setf abort-flag 'cancel)))))
+      ;; deal with queue
+      (when (setf queue (or queue pdd-default-queue))
+        (pdd-then task
+          (lambda (&rest _)
+            (pdd-log 'queue "Task %s fulfilled, releasing %s" task queue)
+            (pdd-queue-release queue task))
+          (lambda (&rest _)
+            (pdd-log 'queue "Task %s rejected, releasing %s" task queue)
+            (pdd-queue-release queue task)))))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)
              do (pdd-log 'req (symbol-name transformer))
@@ -1853,6 +1928,7 @@ If JAR is nil, operates on the default cookie jar."
                             timeout
                             retry
                             proxy
+                            queue
                             &allow-other-keys)
   "Send request using the specified BACKEND.
 
@@ -1893,6 +1969,7 @@ Keyword Arguments:
   :TIMEOUT - Timeout in seconds
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request
+  :QUEUE   - Semaphore object used to limit concurrency (async only)
 
 Returns:
   Response data in sync mode, task object in async mode.
@@ -1922,14 +1999,16 @@ ARGS should a request instances or keywords to build the request."
   (let ((request (if (cl-typep (car args) 'pdd-request)
                      (car args)
                    (apply #'pdd-make-request backend args))))
-    (with-slots (sync init task process) request
+    (with-slots (sync init task process queue) request
       (pdd-log 'req "pdd:around...")
-      ;; user's :init callback is the final chance to change request
-      (when init
-        (pdd-funcall init (list request)))
-      ;; derived to specified backend to deal with the real request
-      (let ((result (cl-call-next-method backend :request request)))
-        (if sync result (setf process result) task)))))
+      (if (or sync (null queue) (memq task (oref queue running)))
+          (let ((result (progn (if init (pdd-funcall init (list request)))
+                               (cl-call-next-method backend :request request))))
+            (if sync result (setf process result) task))
+        (let ((callback (lambda ()
+                          (if init (pdd-funcall init (list request)))
+                          (setf process (cl-call-next-method backend :request request)))))
+          (pdd-queue-acquire queue task callback))))))
 
 (cl-defgeneric pdd-request-transformers (_backend)
   "Return the request transformers will be used by BACKEND."
