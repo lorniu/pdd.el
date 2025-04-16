@@ -2354,6 +2354,9 @@ The value can be either:
 The function will be evaluated dynamically each time `pdd' is invoked, allowing
 for runtime backend selection based on request parameters.")
 
+(defvar pdd-inhibit-keywords-absent nil
+  "Change this if you don't like the absent keywords feature.")
+
 (defun pdd-ensure-default-backend (args)
   "Pursue the value of variable `pdd-default-backend' if it is a function.
 ARGS should be the arguments of function `pdd'."
@@ -2392,7 +2395,8 @@ requiring one to be specified explicitly.
 
 ARGS should be a plist where the first argument is the URL (string).
 Other supported arguments are the same as the generic `pdd' method."
-  (let* ((args (apply #'pdd-complete-absent-keywords args))
+  (let* ((args (if pdd-inhibit-keywords-absent args
+                 (apply #'pdd-complete-absent-keywords args)))
          (backend (pdd-ensure-default-backend args)))
     (unless (and backend (eieio-object-p backend) (object-of-class-p backend 'pdd-backend))
       (user-error "Make sure `pdd-default-backend' is available.  eg:\n
