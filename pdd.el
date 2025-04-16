@@ -2088,9 +2088,9 @@ ARGS should a request instances or keywords to build the request."
 
 (cl-defmethod pdd-transform-error ((_ pdd-url-backend) (request pdd-request) status)
   "Extract error object from callback STATUS for REQUEST."
-  (with-slots (abort-flag) request
-    (cond ((null status)
-           (setf abort-flag 'conn)
+  (with-slots (url abort-flag) request
+    (cond ((and (null status) (= (point-max) 1))
+           (setf abort-flag 'conn) ; sometimes, status is nil. I don't know exactly why.
            `(http "Maybe something wrong with network" 400))
           ((or (null url-http-end-of-headers) (= 1 (point-max)))
            (setf abort-flag 'conn)
