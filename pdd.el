@@ -2344,22 +2344,15 @@ Or switch http backend to `pdd-url-backend' instead:\n
 
 
 
-(defvar pdd-default-backend
-  (if (and (require 'plz nil t) (executable-find plz-curl-program))
-      (pdd-curl-backend)
-    (pdd-url-backend))
+(defvar pdd-default-backend (pdd-url-backend)
   "Default backend used by `pdd' for HTTP requests.
 
 The value can be either:
 - A instance of symbol `pdd-http-backend', or
-- A function that returns such a instance.
+- A function that returns such a instance, signature (&optional url method)
 
-When the value is a function, it will be called with:
-- Either just the URL (string), or
-- Both URL and HTTP method (symbol)
-
-The function will be evaluated dynamically each time `pdd' is invoked,
-allowing for runtime backend selection based on request parameters.")
+The function will be evaluated dynamically each time `pdd' is invoked, allowing
+for runtime backend selection based on request parameters.")
 
 (defun pdd-ensure-default-backend (args)
   "Pursue the value of variable `pdd-default-backend' if it is a function.

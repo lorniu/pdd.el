@@ -36,25 +36,18 @@ The core of the library is function `pdd`:
 
 ;; If no http backend specified, then `pdd-default-backend' will be used
 
-;; You can config it. If not, it will use `(pdd-curl-backend)` if possible,
-;; then fallback to `(pdd-url-backend)` if `plz` is unavailable.
-
 (setq pdd-default-backend (pdd-url-backend))
 (setq pdd-default-backend (pdd-url-backend :proxy "https://localhost:1088"))
 (setq pdd-default-backend (pdd-curl-backend :proxy "socks5://127.0.0.1:1080"))
 
-;; Use a function to dynamically determine which backend to use for a request
-;; The function can have one argument (url), or two arguments (url method)
+;; Dynamically determine backend with a function (&optional url method):
 
 (setq pdd-default-backend
-      (lambda (url)
-        (if (string-match-p "deepl.com/" url)
-            (pdd-curl-backend :proxy "socks5://127.0.0.1:1080")
-          (pdd-curl-backend))))
-
-(setq pdd-default-backend
-      (lambda (_ method)
-        (if (eq method 'patch) (pdd-url-backend) (pdd-curl-backend))))
+      (lambda (url method)
+        (cond ((string-match-p "/image/" url)
+               (pdd-curl-backend :proxy "socks5://127.0.0.1:1080"))
+              ((eq method 'patch) (pdd-url-backend))
+              (t (pdd-curl-backend)))))
 ```
 
 And try to send requests like this:
