@@ -132,12 +132,19 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
                  '(:name "id" :value "a3fWa" :expires (22055 16000) :max-age 2592000 :secure t :path "/" :domain "example.com"))))
 
 (ert-deftest pdd-test-task-then ()
-  (should (= (let ((t1 (pdd-task)))
-               (pdd-then t1
-                 (lambda (v) (+ v 1))
-                 (lambda (e) e))
-               (pdd-task-resolve t1 41))
-             42)))
+  (should (let* ((t1 (pdd-resolve 41))
+                 (then (pdd-then t1
+                         (lambda (v) (+ v 1))
+                         (lambda (e) e))))
+            (equal (aref then 2) (list 42)))))
+
+(ert-deftest pdd-test-funcall ()
+  (should (equal (pdd-funcall (lambda (x y) (list x y)) '(1 2 3 4 :a 22 :b 33))
+                 (list 1 2)))
+  (should (equal (pdd-funcall (lambda (&key a b) (list a b)) '(1 2 3 4 :a 22 :b 33))
+                 (list 22 33)))
+  (should (equal (pdd-funcall (lambda (x &key b) (list x b)) '(1 2 3 4 :a 22 :b 33))
+                 (list 1 33))))
 
 
 ;;; Request Tests

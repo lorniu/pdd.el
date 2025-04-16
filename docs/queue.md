@@ -79,4 +79,4 @@ I used to think that `plz` was much faster than `url.el`. But now after this tes
 In various situations, whether it's single concurrency or multiple concurrency, `plz` is at least 3 times as slow as `url.el`.
 It seems that frequent process creation is not only a resource consumption issue, but also severely impacts speed.
 
-Incredibly, **`url.el` is indeed more high-performance**.
+Incredibly, **`url.el` is indeed more high-performance**, although not very stable.

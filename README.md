@@ -15,7 +15,7 @@ Why this name?
 
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
-- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Request with `queue`](docs/queue.md)
+- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Concurrent control with `queue`](docs/queue.md)
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
 - [Integrate `timers` with task and request](docs/task-timers.md)
 - [Integrate `make-process` with task and request](docs/task-process.md)
@@ -27,27 +27,31 @@ Download the `pdd.el` and place it in your `load-path`.
 
 ## Usage
 
-Just request through `pdd`, with or without specifying an http backend:
+The core of the library is function `pdd`:
 ``` emacs-lisp
-(pdd "https://httpbin.org/user-agent" ...)
-(pdd (pdd-url-backend) "https://httpbin.org/user-agent" ...)
+;; Start a request
 
-;; If request with no http backend specified, the request will be sent
-;; through backend specified by `pdd-default-backend'.
+(pdd "https://httpbin.org/ip" ...)
+(pdd (pdd-url-backend) "https://httpbin.org/ip" ...) ; explicit backend
+
+;; If no http backend specified, then `pdd-default-backend' will be used
 
 ;; You can config it. If not, it will use `(pdd-curl-backend)` if possible,
 ;; then fallback to `(pdd-url-backend)` if `plz` is unavailable.
+
 (setq pdd-default-backend (pdd-url-backend))
 (setq pdd-default-backend (pdd-url-backend :proxy "https://localhost:1088"))
 (setq pdd-default-backend (pdd-curl-backend :proxy "socks5://127.0.0.1:1080"))
 
 ;; Use a function to dynamically determine which backend to use for a request
 ;; The function can have one argument (url), or two arguments (url method)
+
 (setq pdd-default-backend
       (lambda (url)
         (if (string-match-p "deepl.com/" url)
             (pdd-curl-backend :proxy "socks5://127.0.0.1:1080")
           (pdd-curl-backend))))
+
 (setq pdd-default-backend
       (lambda (_ method)
         (if (eq method 'patch) (pdd-url-backend) (pdd-curl-backend))))
@@ -56,23 +60,27 @@ Just request through `pdd`, with or without specifying an http backend:
 And try to send requests like this:
 ``` emacs-lisp
 ;; By default, sync, get
+
 (pdd "https://httpbin.org/user-agent")
 
 ;; Use :headers keyword to supply data sent in http header
 ;; Use :data keyword to supply data sent in http body
 ;; If :data is present, the :method 'post can be ignored
+
 (pdd "https://httpbin.org/post"
   :headers '(("User-Agent" . "..."))
   :data '(("key" . "value")) ; or string "key=value&..." directly
   :method 'post)
 
-;; If :done is present and :sync t is absent, the request will be asynchronous!
+;; If :done is present and :sync t is absent, the request will be asynchronous.
 ;; Perhaps sometimes you should specify :sync nil to make it more explicit.
+
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (message "%s" res)))
 
-;; And with :fail to catch the error
+;; And with :fail to catch error
+
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (message "%s" res))
@@ -80,20 +88,22 @@ And try to send requests like this:
 
 ;; Use `pdd-default-error-handler' to catch error when :fail is absent
 ;; Set its value globally, or just dynamically bind it with let
+
 (let ((pdd-default-error-handler
        (lambda (err) (message "Crying for %s..." (caddr err)))))
   (pdd "https://httpbin.org/post-error"
     :data '(("key" . "value"))
     :done (lambda (res) (print res))))
 
-;; Use :filter to provide logic as every chunk back (for stream feature)
-;; It is a function with no arguments, or headers, or headers and process as arguments
+;; Use :filter to provide logic while every chunk back (for stream feature)
+
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :filter (lambda () (message "%s" (buffer-size)))
   :done (lambda (res) (message "%s" res)))
 
-;; The function :fine will run at last, no matter done or fail, everything is fine
+;; The callback :fine will run at last, no matter done or fail, everything is fine
+
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
   :done (lambda (res) (messsage "%s" res))
@@ -102,59 +112,99 @@ And try to send requests like this:
 
 ;; Use :timeout to set how long one request can wait (seconds)
 ;; Use :retry to set times auto resend the request if timeout
-(pdd "https://httpbin.org/ip"
-  :done #'print :timeout 0.9 :retry 5)
+
+(pdd "https://httpbin.org/ip" :done #'print :timeout 0.9 :retry 5)
 
 ;; Also, you can see, if the content-type is json, :data will be auto decoded,
-;; If the response content-type is json, result string is auto parsed to elisp object
-;; The data type, encoding and multibytes are transformed automatelly all the time
+;; If the response content-type is json, result string is auto converted to elisp object.
+;; The data type, encoding and multibytes are transformed automatelly.
+
 (pdd "https://httpbin.org/post"
   :params '(("name" . "jerry") ("age" . 8)) ; these will be concated to url
   :headers '(("Content-Type" . "application/json")) ; can use abbrev as :headers '(json)
-  :data '(("key" . "value"))          ; this will be encoded to json string automatelly
-  :done (lambda (json) (print json))) ; cause of auto parse, the argument `json' is an alist
+  :data '(("key" . "value"))        ; this will be encoded to json string automatelly
+  :done (lambda (res) (print res))) ; cause of auto conversion, `res' is an alist
+
+;; If you don't want data be auto converted, wrap it with a function
+;; If you don't want response be auto converted, use :as to override
+(pdd "https://httpbin.org/post"
+  :data (lambda () "some-data")
+  :as #'identity :done (lambda (raw) ...))
 
 ;; Specific method
+
 (pdd "https://httpbin.org/uuid")
 (pdd "https://httpbin.org/patch" :method 'patch)
 (pdd "https://httpbin.org/delete" :method 'delete)
 
 ;; Upload. Notice the difference: for file, not (a . path), but a list
 ;; like (name path) or (name path mime-type)
+
 (pdd "https://httpbin.org/post"
   :data '((key1 . "hello")
           (key2 . "world")
           (file1 "~/aaa.xxx")
           (file2 "~/aaa.png" "image/png")))
 
-;; Download
+;; Download, binary content will be auto detected, just save it
+
 (with-temp-file "~/aaa.jpeg"
   (insert (pdd "https://httpbin.org/image/jpeg")))
+
+(pdd "https://httpbin.org/image/jpeg"
+  :done (lambda (r) ; async, non-block
+          (with-temp-file "~/aaa.jpeg"
+            (insert r))))
 ```
 
- Done and other callbacks have dynamical number of arguments. Pass according signatures described below:
+DONE and other callbacks have variadic arguments, use according their signatures:
 ``` emacs-lisp
-;; Arguments of done: (&optional body headers status-code http-version request-instance)
-;; If 0 argument, current buffer is process buffer, otherwise is working buffer
-(pdd "https://httpbin.org/ip" :done (lambda () (message "%s" (buffer-string))))
-(pdd "https://httpbin.org/ip" :done (lambda (body) (message "IP: %s" (cdar body))))
-(pdd "https://httpbin.org/ip" :done (lambda (_body headers) (print headers)))
-(pdd "https://httpbin.org/ip" :done (lambda (_ _ status-code) (print status-code)))
-(pdd "https://httpbin.org/ip" :done (lambda (_ _ _ http-version) (message http-version)))
-(pdd "https://httpbin.org/ip" :done (lambda (_ _ _ _ req) (message "%s" (oref req url))))
+;; Signature of DONE: (&key body headers code version request)
+;; You can use specified arguments with &key in the callback arglist
 
-;; Arguments of filter: (&optional response-headers process request-instance)
+(pdd "https://httpbin.org/ip" :done (lambda (&key body code) (list body code)))
+
+;; For convenience, arguments can be treated as optional args,
+;; and used in the order specified in the signature like this:
+
+(pdd "https://httpbin.org/ip" :done (lambda () (message "hello")))
+(pdd "https://httpbin.org/ip" :done (lambda (body) (message "IP: %s" (cdar body))))
+(pdd "https://httpbin.org/ip" :done (lambda (_ headers code) (list headers code)))
+(pdd "https://httpbin.org/ip" :done (lambda (body &key request) (list body request)))
+
+;; FILTER: (&key headers process request)
+
 (pdd "https://httpbin.org/ip" :filter (lambda () (get-buffer-process (current-buffer))))
 (pdd "https://httpbin.org/ip" :filter (lambda (headers) (message "%s" headers)))
+(pdd "https://httpbin.org/ip" :filter (lambda (&key request) (message "%s" request)))
 
-;; Arguments of fail: (&optional error-message http-status error-object request-instance)
+;; FAIL: (&key text code error request)
+
 (pdd "https://httpbin.org/ip7" :fail (lambda ()       (message "pity.")))
-(pdd "https://httpbin.org/ip7" :fail (lambda (msg)    (message "%s" msg)))
+(pdd "https://httpbin.org/ip7" :fail (lambda (text)   (message "%s" text)))
 (pdd "https://httpbin.org/ip7" :fail (lambda (_ code) (message "%s" code)))
+(pdd "https://httpbin.org/ip7" :fail (lambda (&key error) (message "%s" error)))
 
-;; Arguments of fine: (&optional request-instance)
+;; FINE: (&optional request)
+
 (pdd "https://httpbin.org/ip" :fine (lambda () (message "bye")))
 (pdd "https://httpbin.org/ip" :fine (lambda (req) (message "url: %s" (oref req url))))
+
+;; AS is used to preprocess the content to be passed to DONE,
+;; If it's non-nil, it will override the default auto conversion behavior.
+;; Signature: (&key body headers buffer)
+
+(pdd "https://httpbin.org/ip"
+  :as #'identity ; do nothing with the raw response body, just pass too DONE
+  :done (lambda (raw) (message "RAW: %s" raw)))
+
+(pdd "https://httpbin.org/ip"
+  :as (lambda () (current-buffer)) ; the context of as: process buffer
+  :done (lambda (proc-buffer) ; the context of done: buffer starting the request
+          (message "> work buffer: %s" (current-buffer))
+          (message "> resp buffer: %s" proc-buffer)
+          (with-current-buffer proc-buffer ; with the buffer, resolve yourself
+            (message "> resp content: %s" (buffer-string)))))
 ```
 
 Of course, there are tricks that can make things easier:
@@ -162,6 +212,7 @@ Of course, there are tricks that can make things easier:
 ;; The keywords :method, :data and :done can be omitted.
 ;; Just place url/method/data/done in any order before other keyword args.
 ;; Although not recommended, it is very convenient to send test requests this way
+
 (pdd "https://httpbin.org/anything")
 (pdd "https://httpbin.org/anything" #'print)
 (pdd #'print "https://httpbin.org/anything")
@@ -172,29 +223,42 @@ Of course, there are tricks that can make things easier:
 
 ;; Another sugar is, you can simply code of :headers in the help of abbrevs.
 ;; See `pdd-header-rewrite-rules' for more details. For example:
+
 (pdd "https://httpbin.org/anything"
   :headers `(("Content-Type" . "application/json")
              ("User-Agent" . "Emacs Agent")
              ("Authorization" ,(concat "Bearer " token))
              ("Accept" . "*/*"))
   :done (lambda (res) (print res)))
+
 ;; It can be simplied as:
+
 (pdd 'print "https://httpbin.org/anything"
   :headers `(json ua-emacs (bear ,token) ("Accept" . "*/*")))
 
 ;; The data/headers/done/filter/timeout/retry can be dynamically bound.
-;; In some cases, this is very convenient.
+
 (let ((pdd-default-sync nil)
       (pdd-default-retry 3)
       (pdd-default-headers `(json (bear ,token))))
   (pdd "https://httpbin.org/ip")            ; use default headers/data if exists
   (pdd "https://httpbin.org/uuid" :retry 1) ; override the default variables
   (pdd "https://httpbin.org/user-agent" :headers nil))
+
+;; Therefore, defining a function for request with special settings is a good practice:
+
+(defun my-request (&rest args)
+  (let ((pdd-default-sync nil) (pdd-default-retry 3) (pdd-default-timeout 15) ;; ..
+        (pdd-default-headers `(json (bear ,token)))
+        (pdd-default-done (lambda (r) (message "> %s" r))))
+    (apply #'pdd args)))
+(my-request "https://httpbin.org/ip")
 ```
 
-When handling multiple asynchronous requests, you may encounter **callback hell**, a tangled mess of nested callbacks. However, by using `pdd-task` and `pdd-async/await`, things become much easier ([more examples](docs/promise-and-await.md)):
+When handling multiple asynchronous requests, you may encounter **callback hell**, a tangled mess of nested callbacks. However, by using `pdd-task` and `pdd-async/await`, things become much easier ([more](docs/task-and-async-await.md)):
 ``` emacs-lisp
 ;; For example, request for ip and uuid, then use the results to send new request:
+
 (pdd "https://httpbin.org/ip"
   :done (lambda (r1)
           (pdd "https://httpbin.org/uuid"
@@ -206,7 +270,8 @@ When handling multiple asynchronous requests, you may encounter **callback hell*
                               (message "> Got: %s"
                                        (alist-get 'form r3))))))))
 
-;; You can just simplied as:
+;; You can simply it with async/await as:
+
 (pdd-async
   (let* ((r1 (await (pdd "https://httpbin.org/ip")
                     (pdd "https://httpbin.org/uuid")))
@@ -216,12 +281,21 @@ When handling multiple asynchronous requests, you may encounter **callback hell*
     (message "> Got: %s" (alist-get 'form r2))))
 ```
 
-You will see, it's very similar to C#/TypeScript, even more concise.
+To control concurrent count of multiple requests, use `queue` ([more](docs/queue.md)):
+```emacs-lisp
+(setq queue1 (pdd-queue :limit 7))
+(pdd "https://httpbin.org/ip" :queue queue1)
+```
 
-To control concurrent count of the requests, use `queue`:
-```emacs
-(setq queue1 (pdd-queue :limit 7))      ; create
-(pdd "https://httpbin.org/ip" :queue1)  ; request through queue1
+Unified, simple and smart `proxy` config ([more](docs/proxy.md)):
+```emacs-lisp
+(pdd "https://httpbin.org/ip" :proxy "socks5://127.0.0.1:1080")
+```
+
+Cookies auto management with `cookie-jar` ([more](docs/cookie-jar.md)):
+```emacs-lisp
+(setq cookie-jar-1 (pdd-cookie-jar))
+(pdd "https://httpbin.org/ip" :cookie-jar cookie-jar-1)
 ```
 
 ## Examples
@@ -230,6 +304,7 @@ Download file with progress bar display:
 ``` emacs-lisp
 ;; Replace the url with a big file to have a try
 ;; you can abort the download by deleting the returned process
+
 (let ((reporter (make-progress-reporter "Downloading...")))
   (pdd "https://httpbin.org/image/jpeg"
     :filter (lambda (headers)
@@ -283,22 +358,23 @@ Keyword Arguments:
              * String - sent directly
              * Alist - converted to formdata or JSON based on Content-Type
              * File uploads: ((key filepath))
+             * Function return a string, it will not be auto converted
   :INIT    - Function called before the request is fired by backend:
-             (lambda (&optional request))
+             (&optional request)
   :FILTER  - Filter function called during data reception, signature:
-             (lambda (&optional headers process request))
-  :AS      - Response transformer function for raw response data, signature:
-             (lambda (data &optional headers))
+             (&key headers process request)
+  :AS      - Response transformer function for preprocessing results for DONE:
+             (&key body headers buffer)
   :DONE    - Success callback, signature:
-             (lambda (&optional body headers status-code http-version request))
+             (&key body headers code version request)
   :FAIL    - Failure callback, signature:
-             (&optional error-message http-status-code error-object request)
+             (&key text code error request)
   :FINE    - Final callback (always called), signature:
-             (&optional request-instance)
+             (&optional request)
   :SYNC    - Whether to execute synchronously (boolean)
   :TIMEOUT - Timeout in seconds
   :RETRY   - Number of retry attempts on timeout
-  :PROXY   - Proxy used by current http request
+  :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
 
 Returns:

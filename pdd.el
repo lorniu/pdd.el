@@ -236,7 +236,7 @@ Try to unhex the second part when URL-DECODE is not nil."
 (defun pdd-generic-parse-url (url)
   "Return an URL-struct of the parts of URL with cache support."
   (pdd-with-common-cache (list 'url-obj url)
-    (when (> (hash-table-count pdd-common-cache) 234)
+    (when (> (hash-table-count pdd-common-cache) 1234)
       (clrhash pdd-common-cache))
     (url-generic-parse-url url)))
 
@@ -334,19 +334,43 @@ Return a plist containing all cookie attributes."
   (eq t (compare-strings string1 0 nil string2 0 nil t)))
 
 (defun pdd-function-arglist (function)
+  "Get signature of FUNCTION with cache enabled."
+  (pdd-with-common-cache (list 'signature function)
+    (help-function-arglist function)))
+
+(defun pdd-function-arguments (function)
   "Return the required argument list of FUNCTION to build decorate function."
   (cl-loop for arg in
            (if (or (null function) (equal (func-arity function) '(0 . many)))
                '(a1)
-             (help-function-arglist function))
-           until (memq arg '(&rest &optional &key))
+             (pdd-function-arglist function))
+           until (memq arg '(&rest &optional))
            collect arg))
 
-(defun pdd-funcall (fn args)
-  "Call function FN with the first N arguments from ARGS, where N is FN's arity."
+(defun pdd-funcall (function args)
+  "Call FUNCTION with ARGS dynamically matching FUNCTION's signature.
+
+Example:
+
+  (pdd-funcall (lambda (&key message) message)
+    \\='(:code 404 :message \"notfound\")) ; => \"notfound\"
+
+  (pdd-funcall (lambda (_ message) message)
+    \\='(:code 404 :message \"notfound\")) ; => \"notfound\"
+
+  (pdd-funcall (lambda (err &key bbb) (format \"%s:%s\" err bbb))
+    \\='(:code 404 :message \"notfound\" :aaa 2 :bbb 4)) ;; => \"404:4\""
   (declare (indent 1))
-  (let ((n (car (func-arity fn))))
-    (apply fn (cl-loop for i from 1 to n for x in args collect x))))
+  (let* ((signature (help-function-arglist function))
+         (pos-list (cl-remove-if #'keywordp args))
+         (kwd-plist (when-let* ((pos (cl-position-if #'keywordp args)))
+                      (cl-subseq args pos)))
+         (final-args (cl-loop with keywordp = nil
+                              for arg in signature for i from 0
+                              if (eq arg '&key) do (setq keywordp t) and collect nil
+                              else if keywordp collect (plist-get kwd-plist (intern (format ":%s" arg)))
+                              else collect (nth i pos-list))))
+    (apply function final-args)))
 
 (cl-defgeneric pdd-string-to-object (_type string)
   "Convert STRING to an Elisp object based on the specified content TYPE."
@@ -453,28 +477,24 @@ This variable is used as a fallback when no queue is explicitly provided
 in individual requests.")
 
 (defvar pdd-default-error-handler #'pdd--default-error-handler
-  "The default error handler that display errors when they are not handled by user.
+  "Default error handler that display errors when they are not handled by user.
 
-The signature of the handler is (error &optional request).
+The function is with variadic arguments, signature with (err) or (err req).
 
 When error occurrs and no :fail specified, this will perform as the handler.
 Besides globally set, it also can be dynamically binding in let.")
 
-(defun pdd--default-error-handler (err &optional req)
+(defun pdd--default-error-handler (err req)
   "Default value for `pdd-default-error-handler' to deal with ERR for REQ."
-  (pdd-log 'fail "display error with default-error-handler")
-  (if (atom err) ; maybe a string
+  (if (atom err)
       (setq err `(user-error ,err))
     (when (eq (car err) 'error) ; avoid 'peculiar error'
       (setf (car err) 'user-error)))
-  (let ((abort-flag (and req (with-no-warnings (oref req abort-flag)))))
-    (message
-     "[%s] %s"
-     (if abort-flag abort-flag "unhandled error")
-     (string-trim
-      (if (get (car err) 'error-conditions)
-          (error-message-string err)
-        (mapconcat (lambda (e) (format "%s" e)) err ", "))))))
+  (let ((prefix (or (and req (with-no-warnings (oref req abort-flag))) "unhandled error"))
+        (errmsg (if (get (car err) 'error-conditions)
+                    (error-message-string err)
+                  (mapconcat (lambda (e) (format "%s" e)) err ", "))))
+    (message "[%s] %s" prefix (string-trim errmsg))))
 
 (defconst pdd-default-request-transformers
   '(pdd-transform-req-done
@@ -770,7 +790,7 @@ Otherwise, create a new `pdd-task' which is rejected because of (car args)."
                        (not (aref task 6)) ; still not handled
                        (not (aref task 7))) ; and default not inhibited
               (condition-case err
-                  (funcall pdd-default-error-handler (car error))
+                  (pdd-funcall pdd-default-error-handler (list (car error) nil))
                 (error (message "Error executing default rejection handler: %s" err)))))))
     (if-let* ((context (cadr error)))
         (pdd--with-restored-dynamic-context context
@@ -898,9 +918,10 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
   "Wrap TASK with DONE/FAIL handlers and with FINE and FINE-ARGS for cleanup."
   (pdd-then task
     (if (and done (not (functionp done)))
-        (lambda () (unwind-protect done
-                     (ignore-errors (pdd-funcall fine fine-args))))
-      (let ((args (pdd-function-arglist (or done #'identity))))
+        (lambda ()
+          (unwind-protect done
+            (ignore-errors (pdd-funcall fine fine-args))))
+      (let ((args (pdd-function-arguments (or done #'identity))))
         `(lambda (,@args)
            (unwind-protect
                (,(or done #'identity) ,@args)
@@ -1227,7 +1248,9 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
      (t nil))))
 
 (defmacro pdd-async (&rest body)
-  "Execute BODY asynchronously, allowing `await' for `pdd-task' results."
+  "Execute BODY asynchronously, allowing `await' for `pdd-task' results.
+
+This is implemented with macro expand to `pdd-then' callback."
   (declare (indent 0) (debug t))
   (cl-labels
       ((find-innermost-await (form)
@@ -1590,7 +1613,7 @@ CALLBACK is the function to run when acquire success."
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
   "Construct the :done callback handler for REQUEST."
   (with-slots (url done buffer task) request
-    (let* ((args (pdd-function-arglist done))
+    (let* ((args (pdd-function-arguments done))
            (request-ref request) (original-done done)
            (captured-buffer buffer) (captured-url url))
       (setf done
@@ -1599,9 +1622,8 @@ CALLBACK is the function to run when acquire success."
                (unwind-protect
                    (condition-case err1
                        (with-current-buffer
-                           (if (and (buffer-live-p ,captured-buffer) (cl-plusp ,(length args)))
-                               ,captured-buffer
-                             (current-buffer))
+                           (if (buffer-live-p ,captured-buffer) ,captured-buffer
+                             (current-buffer)) ; don't raise error when original buffer killed
                          (prog1
                              (let ((result (,(or original-done 'identity) ,@args))
                                    (task (oref ,request-ref task)))
@@ -1627,7 +1649,7 @@ CALLBACK is the function to run when acquire success."
                 (with-slots (abort-flag fail) request
                   (pdd-log 'filter "enter")
                   (condition-case err1
-                      (if (zerop (length (help-function-arglist filter1)))
+                      (if (zerop (length (pdd-function-arglist filter1)))
                           ;; with no argument
                           (funcall filter1)
                         ;; arguments: (&optional headers process request)
@@ -1635,7 +1657,7 @@ CALLBACK is the function to run when acquire success."
                                (buffer (current-buffer))
                                (process (get-buffer-process buffer)))
                           (pdd-log 'filter "headers: %s" headers)
-                          (pdd-funcall filter1 (list headers process request))))
+                          (pdd-funcall filter1 (list :headers headers :process process :request request))))
                     (error (pdd-log 'filter "fail: %s" err1)
                            (setf abort-flag 'filter)
                            (funcall fail err1))))))))))
@@ -1670,13 +1692,15 @@ CALLBACK is the function to run when acquire success."
                                 (pdd-log 'fail "calling user :fail callback")
                                 (aset task 7 t) ; set inhibit-default-rejection-p flag
                                 (ignore-errors
-                                  (pdd-funcall fail1 (list (cadr err) (car-safe (cddr err)) err request))))
+                                  (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
+                                                           :error err :request request))))
                               (pdd-log 'fail "reject error to task")
                               (pdd-log 'task "TASK FAIL:  %s" url)
                               (pdd-reject task err context))
                              (fail1
                               (pdd-log 'fail "display error with: fail callback.")
-                              (pdd-funcall fail1 (list (cadr err) (car-safe (cddr err)) err request)))
+                              (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
+                                                       :error err :request request)))
                              (fail-default
                               (pdd-log 'fail "display error with: default error handler")
                               (pdd-funcall fail-default (list err request)))))
@@ -1736,7 +1760,7 @@ CALLBACK is the function to run when acquire success."
   (with-slots (headers data datas binaryp) request
     (setf datas
           (if (functionp data) ; Wrap data in a function can avoid be converted
-              (format "%s" (pdd-funcall data (list headers)))
+              (format "%s" (pdd-funcall data (list request)))
             (if (atom data) ; Never modify the Content-Type when data is atom/string
                 (and data (format "%s" data))
               (let ((ct (alist-get "Content-Type" headers nil nil #'pdd-string-iequal)))
@@ -1895,7 +1919,7 @@ CALLBACK is the function to run when acquire success."
     (pdd-log 'resp "raw: %s" pdd-resp-body)
     (setq pdd-resp-body
           (if (functionp as)
-              (pdd-funcall as (list pdd-resp-body pdd-resp-headers))
+              (pdd-funcall as (list :body pdd-resp-body :headers pdd-resp-headers :buffer (current-buffer)))
             (let* ((ct (alist-get 'content-type pdd-resp-headers))
                    (type (cond ((string-match-p "/json" ct) 'json)
                                (t (intern (car (split-string ct "[; ]")))))))
@@ -1908,8 +1932,8 @@ CALLBACK is the function to run when acquire success."
     (cl-loop for transformer in (pdd-response-transformers (oref request backend))
              do (pdd-log 'resp (symbol-name transformer))
              do (funcall transformer request))
-    (list pdd-resp-body pdd-resp-headers
-          pdd-resp-status pdd-resp-version request)))
+    (list :body pdd-resp-body :headers pdd-resp-headers
+          :code pdd-resp-status :version pdd-resp-version :request request)))
 
 ;; Entrance
 
@@ -1953,22 +1977,23 @@ Keyword Arguments:
              * String - sent directly
              * Alist - converted to formdata or JSON based on Content-Type
              * File uploads: ((key filepath))
+             * Function return a string, it will not be auto converted
   :INIT    - Function called before the request is fired by backend:
-             (lambda (&optional request))
+             (&optional request)
   :FILTER  - Filter function called during data reception, signature:
-             (lambda (&optional headers process request))
-  :AS      - Response transformer function for raw response data, signature:
-             (lambda (data &optional headers))
+             (&key headers process request)
+  :AS      - Response transformer function for preprocessing results for DONE:
+             (&key body headers buffer)
   :DONE    - Success callback, signature:
-             (lambda (&optional body headers status-code http-version request))
+             (&key body headers code version request)
   :FAIL    - Failure callback, signature:
-             (&optional error-message http-status-code error-object request)
+             (&key text code error request)
   :FINE    - Final callback (always called), signature:
-             (&optional request-instance)
+             (&optional request)
   :SYNC    - Whether to execute synchronously (boolean)
   :TIMEOUT - Timeout in seconds
   :RETRY   - Number of retry attempts on timeout
-  :PROXY   - Proxy used by current http request
+  :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
 
 Returns:
@@ -1980,17 +2005,17 @@ Examples:
 
   ;; POST JSON data
   (pdd some-backend \"https://api.example.com/api\"
-       :headers \\='(json)
-       :data \\='((key . \"value\")))
+    :headers \\='(json)
+    :data \\='((key . \"value\")))
 
   ;; Multipart request with file upload
   (pdd some-backend \"https://api.example.com/upload\"
-       :data \\='((file \"path/to/file\")))
+    :data \\='((file \"path/to/file\")))
 
   ;; Async request with callbacks
   (pdd some-backend \"https://api.example.com/data\"
-       :done (lambda (data) (message \"Got: %S\" data))
-       :fail (lambda (err) (message \"Error: %S\" err)))."
+    :done (lambda (data) (message \"Got: %S\" data))
+    :fail (lambda (err) (message \"Error: %S\" err)))."
   (declare (indent 1)))
 
 (cl-defmethod pdd :around ((backend pdd-http-backend) &rest args)
@@ -2326,7 +2351,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
   "Default backend used by `pdd' for HTTP requests.
 
 The value can be either:
-- A instance of function `pdd-http-backend', or
+- A instance of symbol `pdd-http-backend', or
 - A function that returns such a instance.
 
 When the value is a function, it will be called with:

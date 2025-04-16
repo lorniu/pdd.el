@@ -101,4 +101,4 @@ Failover Proxies (can extend to a proxy pool):
 
 ## Miscellaneous
 
-**Notice:** The URL backend automatically applies the same proxy to both HTTP and HTTPS connections by default. To implement protocol-specific proxy routing (e.g., different proxies for HTTP vs HTTPS), you can use a dynamic proxy function as the Protocol-Specific example.
+**Notice:** The `pdd-url-backend` automatically applies the same proxy to both HTTP and HTTPS connections by default. To implement protocol-specific proxy routing (e.g., different proxies for HTTP vs HTTPS), you can use a dynamic proxy function as the Protocol-Specific example.
