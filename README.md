@@ -291,6 +291,12 @@ Cookies auto management with `cookie-jar` ([more](docs/cookie-jar.md)):
 (pdd "https://httpbin.org/ip" :cookie-jar cookie-jar-1)
 ```
 
+Use `:verbose` to inspect the request/response headers:
+```emacs-lisp
+(pdd "https://httpbin.org/ip" :verbose t)        ; show in message buffer
+(pdd "https://httpbin.org/ip" :verbose #'insert) ; can be a function. here insert
+```
+
 ## Examples
 
 Download file with progress bar display:
@@ -329,6 +335,7 @@ Download file with progress bar display:
                             retry
                             proxy
                             queue
+                            verbose
                             &allow-other-keys)
   "Send HTTP request using the specified BACKEND.
 
@@ -369,6 +376,7 @@ Keyword Arguments:
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
+  :VERBOSE - Display extra informations like headers when request, boolean/function
 
 Returns:
   Response data in sync mode, task object in async mode.)

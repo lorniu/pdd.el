@@ -504,7 +504,8 @@ Besides globally set, it also can be dynamically binding in let.")
     pdd-transform-req-cookies
     pdd-transform-req-data
     pdd-transform-req-proxy
-    pdd-transform-req-finally)
+    pdd-transform-req-others
+    pdd-transform-req-verbose)
   "List of functions that transform the request object in sequence.
 
 Each transformer is a function that takes the current request object as its
@@ -519,6 +520,7 @@ the built-in transformers unless you fully understand the consequences.")
 
 (defconst pdd-default-response-transformers
   '(pdd-transform-resp-init
+    pdd-transform-resp-verbose
     pdd-transform-resp-headers
     pdd-transform-resp-cookies
     pdd-transform-resp-decode
@@ -1607,7 +1609,8 @@ CALLBACK is the function to run when acquire success."
    (queue      :initarg :queue       :type (or pdd-queue null) :initform nil)
    (process    :initarg :process     :initform nil)
    (abort-flag :initarg :abort-flag  :initform nil)
-   (task       :initarg :task        :initform nil))
+   (task       :initarg :task        :initform nil)
+   (verbose    :initarg :verbose     :type (or function boolean) :initform nil))
   "Abstract base class for HTTP request configs.")
 
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
@@ -1805,13 +1808,23 @@ CALLBACK is the function to run when acquire success."
           (if pass (plist-put proxy :pass pass))))
       (oset request proxy proxy))))
 
-(cl-defmethod pdd-transform-req-finally ((request pdd-request))
+(cl-defmethod pdd-transform-req-others ((request pdd-request))
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'pdd-string-iequal)
       (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
+
+(cl-defmethod pdd-transform-req-verbose ((request pdd-request))
+  "Request output in verbose mode for REQUEST."
+  (with-slots (verbose headers buffer) request
+    (when verbose
+      (let ((hs (mapconcat (lambda (header)
+                             (format "> %s: %s" (car header) (cdr header)))
+                           headers "\n")))
+        (with-current-buffer buffer
+          (funcall (if (functionp verbose) verbose #'princ) (concat hs "\n")))))))
 
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
@@ -1878,6 +1891,15 @@ CALLBACK is the function to run when acquire success."
   (save-excursion ; Clean the ^M in headers
     (while (search-forward "\r" pdd-resp-mark :noerror)
       (replace-match ""))))
+
+(cl-defmethod pdd-transform-resp-verbose (request)
+  "Response output in verbose mode for REQUEST."
+  (with-slots (verbose buffer) request
+    (when verbose
+      (let* ((raw-headers (buffer-substring (point-min) (max 1 (- pdd-resp-mark 2))))
+             (hs (replace-regexp-in-string "^" "< " raw-headers)))
+        (with-current-buffer buffer
+          (funcall (if (functionp verbose) verbose #'princ) hs))))))
 
 (cl-defmethod pdd-transform-resp-headers (_request)
   "Extract status line and headers."
@@ -1953,6 +1975,7 @@ CALLBACK is the function to run when acquire success."
                             retry
                             proxy
                             queue
+                            verbose
                             &allow-other-keys)
   "Send request using the specified BACKEND.
 
@@ -1995,6 +2018,7 @@ Keyword Arguments:
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
+  :VERBOSE - Display extra informations like headers when request, bool/function
 
 Returns:
   Response data in sync mode, task object in async mode.
