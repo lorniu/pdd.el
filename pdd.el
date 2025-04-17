@@ -376,6 +376,10 @@ Example:
   "Convert STRING to an Elisp object based on the specified content TYPE."
   (:method ((_ (eql 'json)) string)
            (json-parse-string string :object-type 'alist))
+  (:method ((_ (eql 'xml)) string)
+           (with-temp-buffer
+             (insert string)
+             (libxml-parse-xml-region (point-min) (point-max))))
   string)
 
 (cl-defgeneric pdd-object-to-string (type _object)
@@ -1940,12 +1944,16 @@ CALLBACK is the function to run when acquire success."
     (setq pdd-resp-body (buffer-substring pdd-resp-mark (point-max)))
     (pdd-log 'resp "raw: %s" pdd-resp-body)
     (setq pdd-resp-body
-          (if (functionp as)
-              (pdd-funcall as (list :body pdd-resp-body :headers pdd-resp-headers :buffer (current-buffer)))
-            (let* ((ct (alist-get 'content-type pdd-resp-headers))
-                   (type (cond ((string-match-p "/json" ct) 'json)
-                               (t (intern (car (split-string ct "[; ]")))))))
-              (pdd-string-to-object type pdd-resp-body))))))
+          (cond
+           ((functionp as)
+            (pdd-funcall as (list :body pdd-resp-body :headers pdd-resp-headers :buffer (current-buffer))))
+           ((and as (symbolp as))
+            (pdd-string-to-object as pdd-resp-body))
+           (t (let* ((ct (alist-get 'content-type pdd-resp-headers))
+                     (type (cond ((string-match-p "/json" ct) 'json)
+                                 ((string-match-p "/xml\\|\\+xml" ct) 'xml)
+                                 (t (intern (car (split-string ct "[; ]")))))))
+                (pdd-string-to-object type pdd-resp-body)))))))
 
 (cl-defmethod pdd-transform-response (request)
   "Run all response transformers for REQUEST to get the results."
@@ -2005,8 +2013,9 @@ Keyword Arguments:
              (&optional request)
   :FILTER  - Filter function called during data reception, signature:
              (&key headers process request)
-  :AS      - Response transformer function for preprocessing results for DONE:
-             (&key body headers buffer)
+  :AS      - Preprocess results for DONE, accepts:
+             * Symbol, process with `pdd-string-to-object' and `AS' as type
+             * Function with signature (&key body headers buffer)
   :DONE    - Success callback, signature:
              (&key body headers code version request)
   :FAIL    - Failure callback, signature:

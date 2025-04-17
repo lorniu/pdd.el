@@ -188,7 +188,7 @@ DONE and other callbacks have variadic arguments, use according their signatures
 ;; Signature: (&key body headers buffer)
 
 (pdd "https://httpbin.org/ip"
-  :as #'identity ; do nothing with the raw response body, just pass too DONE
+  :as #'identity ; do nothing with the raw response body, just pass it to DONE
   :done (lambda (raw) (message "RAW: %s" raw)))
 
 (pdd "https://httpbin.org/ip"
@@ -198,6 +198,12 @@ DONE and other callbacks have variadic arguments, use according their signatures
           (message "> resp buffer: %s" proc-buffer)
           (with-current-buffer proc-buffer ; with the buffer, resolve yourself
             (message "> resp content: %s" (buffer-string)))))
+
+;; Of cause, you can custom `as' type like this:
+
+(cl-defmethod pdd-string-to-object ((_ (eql 'your-type)) string)
+  (your-parse-logic string))
+(pdd "https://example.com/site" :as 'your-type :done (lambda (your-obj) ...))
 ```
 
 Of course, there are tricks that can make things easier:
@@ -363,8 +369,9 @@ Keyword Arguments:
              (&optional request)
   :FILTER  - Filter function called during data reception, signature:
              (&key headers process request)
-  :AS      - Response transformer function for preprocessing results for DONE:
-             (&key body headers buffer)
+  :AS      - Preprocess results for DONE, accepts:
+             * Symbol, process with `pdd-string-to-object' and `AS' as type
+             * Function with signature (&key body headers buffer)
   :DONE    - Success callback, signature:
              (&key body headers code version request)
   :FAIL    - Failure callback, signature:
