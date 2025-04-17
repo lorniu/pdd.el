@@ -2,21 +2,36 @@
 
 There is one light and smart queue implement.
 
-## Basic usage
+## Usage
 
-The use of queue is non-intrusive. Just specify a queue object using `:queue` to enable queuing:
+The use of queue is non-intrusive. Just create a queue object and enable it.
+
+Create queue (indeed a semaphore object):
 ```emacs-lisp
-;; create queue (indeed a semaphore object)
-(setq queue2 (pdd-queue :limit 2)) ; specify concurrent with :limit
-(setq queue1 (pdd-queue))          ; default limit to 6
+;; there are two mechanisms: concurrency control and request throttling
 
+;; concurrency control: how many connections are allowed at same time
+(setq queue1 (pdd-queue))           ; default limit to 6 concurrency
+(setq queue2 (pdd-queue :limit 2))  ; specify concurrency with :limit
+(setq queue3 (pdd-queue :limit 1))  ; limit to 1, meaning, request one by one
+
+;; request throttling: limit request rates during one second (QPS)
+(setq queue4 (pdd-queue :rate 2))   ; at most 2 requests per second
+(setq queue5 (pdd-queue :rate 0.2)) ; start a request every 5 seconds
+
+;; or mix two mechanisms together
+(setq queue6 (pdd-queue :limit 4 :rate 9)) ; concurrency 4 + QPS 9
+```
+
+Then use the created queue object with `:queue`:
+```emacs-lisp
 ;; use different queues for different async requests
 (let ((pdd-default-sync nil))
   (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue1))
   (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue2)))
 
-;; request will be auto added to the specified queue
-;; notice: only those asynchronous requests will be added
+;; request will be auto managed by the specified queue
+;; notice: only those asynchronous requests will be queued
 (let ((pdd-default-sync nil))
   (pdd "https://httpbin.org/ip" :queue queue1)
   (pdd "https://httpbin.org/ip" :queue queue2)
@@ -38,6 +53,34 @@ Use `pdd-default-queue` to make things easier:
 ;; There is a `:fine' callback, will be triggered every time when queue is empty
 (let ((pdd-default-queue (pdd-queue :limit 1 :fine (lambda () (message "Done.")))))
   (dotimes (i 20) (pdd "https://httpbin.org/ip")))
+```
+
+The `limit/rate` can be dynamical changed:
+```emacs-lisp
+(setq queue1 (pdd-queue :rate 0.3)) ; initial rate
+
+(dotimes (i 20)
+  (pdd "https://httpbin.org/ip"
+    (lambda ()
+      (pcase i ; change in runtime
+        (3 (oset queue1 rate 2))
+        (7 (oset queue1 rate 5)))
+      (message "> %d. %s" i (format-time-string "%T")))
+    :queue queue1))
+```
+
+## Example. Finish these requests with 20 seconds
+
+```emacs-lisp
+(let* ((begin (current-time))
+       (pdd-default-queue (pdd-queue
+                           :rate 2.7 ; 50 / 20 = 2.5
+                           :fine (lambda ()
+                                   (message "Elapsed %d seconds"
+                                            (float-time (time-since begin)))))))
+  (dotimes (i 50)
+    (pdd "https://httpbin.org/ip"
+      (lambda (r) (message "> %d. %s" i (alist-get 'origin r))))))
 ```
 
 ## Example. Who is faster, url.el or plz.el?

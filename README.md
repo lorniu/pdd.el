@@ -15,7 +15,7 @@ Why this name?
 
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
-- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Concurrent control with `queue`](docs/queue.md)
+- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Control concurrency with `:queue`](docs/queue.md)
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
 - [Integrate `timers` with task and request](docs/task-timers.md)
 - [Integrate `make-process` with task and request](docs/task-process.md)

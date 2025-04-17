@@ -1537,53 +1537,112 @@ If JAR is nil, operates on the default cookie jar."
 ;; Queue
 
 (defclass pdd-queue ()
-  ((limit :initarg :limit
-          :initform 6
-          :type integer
+  (;; concurrency control
+   (limit :initarg :limit
+          :type (or null (integer 1 *))
+          :initform nil
           :documentation "Max concurrent tasks")
-   (running :type list :initform nil
+   ;; request throttling
+   (rate   :initarg :rate
+           :type (or null number)
+           :initform nil)
+   (capacity :initarg :capacity
+             :type (or null (integer 1 *))
+             :initform nil)
+   (tokens :type float :initform 0.0)
+   (refill-time :initform nil)
+   (check-timer :type (or null vector) :initform nil)
+   ;; queues
+   (running :type list
+            :initform nil
             :documentation "Current running tasks")
-   (waiting :type list :initform nil
+   (waiting :type list
+            :initform nil
             :documentation "Waiting list of (task . callback)")
-   (fine :initarg :fine :type (or function null) :initform nil
+   ;; callback
+   (fine :initarg :fine
+         :type (or function null)
+         :initform nil
          :documentation "Function to run when all tasks finished"))
-  :documentation "Represent a queue to limit concurrent operations.")
+  :documentation "Represent a queue to limit concurrent operations, indeed a semaphore.")
 
-(cl-defgeneric pdd-queue--signal-cancel-handler (queue task)
+(cl-defmethod initialize-instance :after ((queue pdd-queue) &rest _)
+  "Initialize throttling state if rate is set for QUEUE."
+  (with-slots (limit rate capacity tokens refill-time) queue
+    (when rate
+      (unless (> rate 0) (user-error ":rate must be positive"))
+      (unless capacity (setf capacity (max 1 (ceiling rate))))
+      (setf tokens (float capacity))
+      (setf refill-time (current-time)))
+    (when (and (null rate) (null limit))
+      (setf limit 6))))
+
+(defun pdd-queue--refill-tokens (queue)
+  "Refill tokens based on elapsed time and rate of QUEUE."
+  (with-slots (rate capacity tokens refill-time) queue
+    (when (and rate refill-time)
+      (let* ((now (current-time))
+             (elapsed (float-time (time-subtract now refill-time))))
+        (setf tokens (min (float capacity) (+ tokens (* elapsed rate))))
+        (setf refill-time now)))))
+
+(defun pdd-queue--process-waiting (queue)
+  "Try to active the next task from waiting list of QUEUE."
+  (with-slots (running waiting rate tokens check-timer) queue
+    (when (timerp check-timer)
+      (ignore-errors (cancel-timer check-timer))
+      (setf check-timer nil))
+    (when waiting
+      (cl-block process-loop
+        (while waiting
+          (if (eq (pdd-queue-acquire queue (car waiting)) t)
+              (pop waiting)
+            (cl-return-from process-loop)))))
+    (when (and rate (null running) waiting)
+      (let ((delay (if (>= tokens 1.0) 0
+                     (max 0.05 (+ (/ (- 1.0 tokens) rate) 0.01)))))
+        (pdd-log 'queue "delay for waiting: %.1f" delay)
+        (setf check-timer (run-at-time delay nil #'pdd-queue--process-waiting queue))))))
+
+(defun pdd-queue--signal-cancel-handler (queue task)
   "Create a signal handler specifically for TASK in QUEUE."
   (lambda (sig)
     (with-slots (waiting) queue
       (when (and (eq sig 'cancel) (assoc task waiting))
         (setf waiting (cl-remove task waiting :key #'car))))))
 
-(cl-defgeneric pdd-queue-acquire (queue task callback)
-  "Attempt to acquire the QUEUE for TASK.
-Add to running or waiting list of QUEUE accordings.
-CALLBACK is the function to run when acquire success."
-  (with-slots (limit running waiting) queue
-    (pdd-log 'queue "Acquire attempt: limit=%d, running=%d, waiting=%d" limit (length running) (length waiting))
-    (if (< (length running) limit)
-        (progn (funcall callback)
-               (push task running)
-               (pdd-log 'queue "Add to running list, len=%s" (length running))
-               t)
-      (let ((handler (pdd-queue--signal-cancel-handler queue task))
-            (original-signal-fn (aref task 5)))
-        (setf waiting (nconc waiting (list (cons task callback))))
-        (aset task 5 (lambda (&optional signal-sym)
-                       (funcall handler signal-sym)
-                       (when original-signal-fn
-                         (pdd-funcall original-signal-fn (list signal-sym)))))
-        (pdd-log 'queue "Add to waiting list, len=%s" (length waiting))))))
+(defun pdd-queue-acquire (queue task-pair)
+  "Attempt to acquire the QUEUE for task in TASK-PAIR.
 
-(cl-defgeneric pdd-queue-release (queue task)
+Add to running or waiting list of QUEUE accordings.
+
+TASK-PAIR is a cons cell of (task . callback), where callback is a function used
+to be called when task is acquired."
+  (with-slots (limit rate tokens running waiting) queue
+    (if rate (pdd-queue--refill-tokens queue))
+    (let ((task (car task-pair))
+          (callback (cdr task-pair))
+          (concurrency-ok (or (null limit) (< (length running) limit)))
+          (throttling-ok (or (null rate) (>= tokens 1.0))))
+      (if (and concurrency-ok throttling-ok)
+          (progn (if rate (cl-decf tokens 1.0)) ; consume token
+                 (funcall callback) ; fire the request
+                 (push task running) ; add to running list
+                 t)
+        (unless (member task-pair waiting)
+          (let ((handler (pdd-queue--signal-cancel-handler queue task))
+                (signal-fn (aref task 5)))
+            (setf waiting (nconc waiting (list task-pair)))
+            (aset task 5 (lambda (&optional signal-sym)
+                           (funcall handler signal-sym)
+                           (when signal-fn
+                             (pdd-funcall signal-fn (list signal-sym)))))))))))
+
+(defun pdd-queue-release (queue task)
   "Release the TASK from QUEUE and run the next task from waiting list."
-  (with-slots (limit running waiting fine) queue
-    (pdd-log 'queue "Release attempt: limit=%d, running=%d, waiting=%d" limit (length running) (length waiting))
-    (setf running (cl-remove task running))
-    (when-let* ((item (pop waiting)))
-      (funcall (cdr item))
-      (push (car item) running))
+  (with-slots (running waiting fine) queue
+    (setf running (delq task running))
+    (pdd-queue--process-waiting queue)
     (when (and fine (null running) (null waiting))
       (pdd-funcall fine (list queue task)))))
 
@@ -1862,10 +1921,8 @@ CALLBACK is the function to run when acquire success."
       (when (setf queue (or queue pdd-default-queue))
         (pdd-then task
           (lambda (&rest _)
-            (pdd-log 'queue "Task %s fulfilled, releasing %s" task queue)
             (pdd-queue-release queue task))
           (lambda (&rest _)
-            (pdd-log 'queue "Task %s rejected, releasing %s" task queue)
             (pdd-queue-release queue task)))))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)
@@ -2066,7 +2123,7 @@ ARGS should a request instances or keywords to build the request."
         (let ((callback (lambda ()
                           (if init (pdd-funcall init (list request)))
                           (setf process (cl-call-next-method backend :request request)))))
-          (pdd-queue-acquire queue task callback))))))
+          (pdd-queue-acquire queue (cons task callback)))))))
 
 (cl-defgeneric pdd-request-transformers (_backend)
   "Return the request transformers will be used by BACKEND."
