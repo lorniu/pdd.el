@@ -11,9 +11,9 @@ Create queue (indeed a semaphore object):
 ;; there are two mechanisms: concurrency control and request throttling
 
 ;; concurrency control: how many connections are allowed at same time
-(setq queue1 (pdd-queue))           ; default limit to 6 concurrency
-(setq queue2 (pdd-queue :limit 2))  ; specify concurrency with :limit
-(setq queue3 (pdd-queue :limit 1))  ; limit to 1, meaning, request one by one
+(setq queue1 (pdd-queue))           ; default limit to 10 concurrency
+(setq queue2 (pdd-queue :limit 6))  ; specify concurrency with :limit
+(setq queue3 (pdd-queue :limit 1))  ; limit to 1, means, request one by one
 
 ;; request throttling: limit request rates during one second (QPS)
 (setq queue4 (pdd-queue :rate 2))   ; at most 2 requests per second
@@ -21,36 +21,44 @@ Create queue (indeed a semaphore object):
 
 ;; or mix two mechanisms together
 (setq queue6 (pdd-queue :limit 4 :rate 9)) ; concurrency 4 + QPS 9
+
+;; also you can dynamically dispatch queues with a function queue
+(setq queue7
+      (lambda (request)
+        (cond ((string-match-p "/image" (oref request url)) queue1)
+              ((> (random 10) 5) queue2))))
 ```
 
 Then use the created queue object with `:queue`:
 ```emacs-lisp
-;; use different queues for different async requests
+;; specify a queue, and the request will be auto managed by it
+(pdd "https://httpbin.org/ip" :done #'print :queue queue1)
+
+;; notice, only asynchronous requests can be queued, otherwise :queue will be ignored
 (let ((pdd-default-sync nil))
-  (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue1))
   (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue2)))
 
-;; request will be auto managed by the specified queue
-;; notice: only those asynchronous requests will be queued
+;; dispatch different requests to different queues
 (let ((pdd-default-sync nil))
-  (pdd "https://httpbin.org/ip" :queue queue1)
-  (pdd "https://httpbin.org/ip" :queue queue2)
+  (pdd "https://httpbin.org/ip" :queue queue3)
+  (pdd "https://httpbin.org/ip" :queue queue4)
   (pdd "https://httpbin.org/ip")
-  (pdd "https://httpbin.org/ip" :queue queue2))
+  (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue3))
+  (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue7)))
 ```
 
 Use `pdd-default-queue` to make things easier:
 ```emacs-lisp
-;; set global value for all `pdd' without specify :queue
+;; set global value for all `pdd's without :queue specified
 (setq pdd-default-queue (pdd-queue :limit 3))
-(pdd "https://httpbin.org/ip" :done #'print) ; this will auto be managed by default queue
+(pdd "https://httpbin.org/ip" :done #'print) ; this will be auto managed by default queue
 
-;; But global value is not recommended, dynamic binding is preferred!
+;; but global value is not recommended, dynamic binding is preferred!
 (let ((pdd-default-queue (pdd-queue :limit 1)))
-  (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue1))
-  (dotimes (i 20) (pdd "https://httpbin.org/ip"))) ; these will use the default queue (request one by one)
+  (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue1)) ; these use queue1
+  (dotimes (i 20) (pdd "https://httpbin.org/ip"))) ; these use the default queue (request one by one)
 
-;; There is a `:fine' callback, will be triggered every time when queue is empty
+;; there is a `:fine' callback, will be triggered every time when queue is empty
 (let ((pdd-default-queue (pdd-queue :limit 1 :fine (lambda () (message "Done.")))))
   (dotimes (i 20) (pdd "https://httpbin.org/ip")))
 ```

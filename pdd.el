@@ -74,8 +74,8 @@
 ;;      (let* ((r1 (await (pdd "https://httpbin.org/ip")
 ;;                        (pdd "https://httpbin.org/uuid")))
 ;;             (r2 (await (pdd "https://httpbin.org/anything"
-;;                          :data `((ip . ,(alist-get 'origin (car r1)))
-;;                                  (id . ,(alist-get 'uuid (cadr r1))))))))
+;;                          `((ip . ,(alist-get 'origin (car r1)))
+;;                            (id . ,(alist-get 'uuid (cadr r1))))))))
 ;;        (message "> Got: %s" (alist-get 'form r2))))
 ;;
 ;; See README.md of https://github.com/lorniu/pdd.el for more
@@ -728,7 +728,7 @@ Otherwise, create a new `pdd-task' which is rejected because of (car args)."
       (if (functionp signal)
           (funcall signal)
         (when (functionp signal-fn)
-          (pdd-funcall signal-fn (list signal)))))))
+          (pdd-funcall signal-fn (list signal task)))))))
 
 (defun pdd-task--settle (task status v)
   "Settle TASK to STATUS with V is value or reason."
@@ -1566,6 +1566,8 @@ If JAR is nil, operates on the default cookie jar."
          :documentation "Function to run when all tasks finished"))
   :documentation "Represent a queue to limit concurrent operations, indeed a semaphore.")
 
+(defvar pdd-queue-default-limit 10)
+
 (cl-defmethod initialize-instance :after ((queue pdd-queue) &rest _)
   "Initialize throttling state if rate is set for QUEUE."
   (with-slots (limit rate capacity tokens refill-time) queue
@@ -1575,7 +1577,7 @@ If JAR is nil, operates on the default cookie jar."
       (setf tokens (float capacity))
       (setf refill-time (current-time)))
     (when (and (null rate) (null limit))
-      (setf limit 6))))
+      (setf limit pdd-queue-default-limit))))
 
 (defun pdd-queue--refill-tokens (queue)
   "Refill tokens based on elapsed time and rate of QUEUE."
@@ -1678,31 +1680,32 @@ to be called when task is acquired."
 
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
   "Construct the :done callback handler for REQUEST."
-  (with-slots (url done buffer task) request
+  (with-slots (url done buffer) request
     (let* ((args (pdd-function-arguments done))
            (request-ref request) (original-done done)
            (captured-buffer buffer) (captured-url url))
       (setf done
             `(lambda ,args
                (pdd-log 'done "enter")
-               (unwind-protect
-                   (condition-case err1
-                       (with-current-buffer
-                           (if (buffer-live-p ,captured-buffer) ,captured-buffer
-                             (current-buffer)) ; don't raise error when original buffer killed
-                         (prog1
-                             (let ((result (,(or original-done 'identity) ,@args))
-                                   (task (oref ,request-ref task)))
-                               (if (not (pdd-task-p task))
-                                   result
-                                 (pdd-log 'task "TASK DONE:  %s" ,captured-url)
-                                 (pdd-resolve task result ,request-ref)))
-                           (pdd-log 'done "finished.")))
-                     (error (setf (oref ,request-ref abort-flag) 'done)
-                            (pdd-log 'done "error. %s" err1)
-                            (funcall (oref ,request-ref fail) err1)))
-                 (ignore-errors
-                   (pdd-funcall (oref ,request-ref fine) (list ,request-ref)))))))))
+               (let ((task (oref ,request-ref task))
+                     (queue (oref ,request-ref queue)))
+                 (unwind-protect
+                     (condition-case err1
+                         (with-current-buffer
+                             (if (buffer-live-p ,captured-buffer) ,captured-buffer
+                               (current-buffer)) ; don't raise error when original buffer killed
+                           (prog1
+                               (let ((result (,(or original-done 'identity) ,@args)))
+                                 (if (not (pdd-task-p task))
+                                     result
+                                   (pdd-log 'task "TASK DONE:  %s" ,captured-url)
+                                   (pdd-resolve task result ,request-ref)))
+                             (pdd-log 'done "finished.")))
+                       (error (setf (oref ,request-ref abort-flag) 'done)
+                              (pdd-log 'done "error. %s" err1)
+                              (funcall (oref ,request-ref fail) err1)))
+                   (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
+                   (ignore-errors (pdd-funcall (oref ,request-ref fine) (list ,request-ref))))))))))
 
 (cl-defmethod pdd-transform-req-filter ((request pdd-request))
   "Construct the :filter callback handler for REQUEST."
@@ -1730,7 +1733,7 @@ to be called when task is acquired."
 
 (cl-defmethod pdd-transform-req-fail ((request pdd-request))
   "Construct the :fail callback handler for REQUEST."
-  (with-slots (retry fail fine abort-flag backend) request
+  (with-slots (url retry fail fine abort-flag task queue backend) request
     (setf fail
           (let ((fail1 fail)
                 (fail-default pdd-default-error-handler)
@@ -1746,33 +1749,32 @@ to be called when task is acquired."
                         (let ((inhibit-message t))
                           (message "(%d) retring for %s..." retry (cadr err))))
                       (cl-decf retry)
-                      (setf abort-flag nil)
                       (pdd backend request))
                   ;; really fail
                   (unwind-protect
                       (condition-case err1
-                          (with-slots (url task) request
-                            (cond ; error -> :fail -> task chain -> on-rejected | default handler
-                             ((pdd-task-p task)
-                              (when fail1
-                                (pdd-log 'fail "calling user :fail callback")
-                                (aset task 7 t) ; set inhibit-default-rejection-p flag
-                                (ignore-errors
-                                  (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
-                                                           :error err :request request))))
-                              (pdd-log 'fail "reject error to task")
-                              (pdd-log 'task "TASK FAIL:  %s" url)
-                              (pdd-reject task err context))
-                             (fail1
-                              (pdd-log 'fail "display error with: fail callback.")
-                              (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
-                                                       :error err :request request)))
-                             (fail-default
-                              (pdd-log 'fail "display error with: default error handler")
-                              (pdd-funcall fail-default (list err request)))))
+                          (cond ; error -> :fail -> task chain -> on-rejected | default handler
+                           ((pdd-task-p task)
+                            (when fail1
+                              (pdd-log 'fail "calling user :fail callback")
+                              (aset task 7 t) ; set inhibit-default-rejection-p flag
+                              (ignore-errors
+                                (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
+                                                         :error err :request request))))
+                            (pdd-log 'fail "reject error to task")
+                            (pdd-log 'task "TASK FAIL:  %s" url)
+                            (pdd-reject task err context))
+                           (fail1
+                            (pdd-log 'fail "display error with: fail callback.")
+                            (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
+                                                     :error err :request request)))
+                           (fail-default
+                            (pdd-log 'fail "display error with: default error handler")
+                            (pdd-funcall fail-default (list err request))))
                         (error (pdd-log 'fail "oooop, error occurs when display error.")
                                (message "Oooop, error in error handling: %s" err1)))
                     ;; finally
+                    (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
                     (ignore-errors (pdd-funcall fine (list request)))))))))))
 
 (cl-defmethod pdd-transform-req-headers ((request pdd-request))
@@ -1904,6 +1906,7 @@ to be called when task is acquired."
     (unless filter (setf filter pdd-default-filter))
     (unless timeout (setf timeout pdd-default-timeout))
     (unless retry (setf retry pdd-default-retry))
+    (unless queue (setf queue pdd-default-queue))
     ;; init other slots
     (unless (slot-boundp request 'sync)
       (setf sync (if (eq pdd-default-sync 'unset)
@@ -1914,16 +1917,11 @@ to be called when task is acquired."
       ;; create task for asynchronous request
       (setf task
             (pdd-with-new-task
-             :signal (lambda ()
+             :signal (lambda (_ t1)
                        (pdd-log 'signal "cancel: %s" url)
-                       (unless abort-flag (setf abort-flag 'cancel)))))
-      ;; deal with queue
-      (when (setf queue (or queue pdd-default-queue))
-        (pdd-then task
-          (lambda (&rest _)
-            (pdd-queue-release queue task))
-          (lambda (&rest _)
-            (pdd-queue-release queue task)))))
+                       (unless abort-flag
+                         (setf abort-flag 'cancel)
+                         (pdd-reject t1 'cancel))))))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)
              do (pdd-log 'req (symbol-name transformer))
@@ -2111,19 +2109,35 @@ Examples:
 (cl-defmethod pdd :around ((backend pdd-http-backend) &rest args)
   "The common logics before or after the http request for BACKEND.
 ARGS should a request instances or keywords to build the request."
-  (let ((request (if (cl-typep (car args) 'pdd-request)
-                     (car args)
-                   (apply #'pdd-make-request backend args))))
-    (with-slots (sync init task process queue) request
-      (pdd-log 'req "pdd:around...")
-      (if (or sync (null queue) (memq task (oref queue running)))
-          (let ((result (progn (if init (pdd-funcall init (list request)))
-                               (cl-call-next-method backend :request request))))
-            (if sync result (setf process result) task))
-        (let ((callback (lambda ()
-                          (if init (pdd-funcall init (list request)))
-                          (setf process (cl-call-next-method backend :request request)))))
-          (pdd-queue-acquire queue (cons task callback)))))))
+  (let (request)
+    (condition-case err
+        (with-slots (sync init process task queue abort-flag)
+            (setq request
+                  (if (cl-typep (car args) 'pdd-request)
+                      (car args)
+                    (apply #'pdd-make-request backend args)))
+          (pdd-log 'req "pdd:around...")
+          (let ((real-queue (if (functionp queue)
+                                (pdd-funcall queue (list request))
+                              queue)))
+            (if (or sync (null real-queue)
+                    (memq task (oref real-queue running))) ; for retry logic
+                (let ((result (progn (if init (pdd-funcall init (list request)))
+                                     (setf abort-flag nil)
+                                     (cl-call-next-method backend :request request))))
+                  (if sync result (setf process result) task))
+              (let* ((context (pdd--capture-dynamic-context))
+                     (callback (lambda ()
+                                 (pdd--with-restored-dynamic-context context
+                                   (if init (pdd-funcall init (list request)))
+                                   (setf abort-flag nil)
+                                   (setf process (cl-call-next-method backend :request request))))))
+                (pdd-log 'queue "acquire queue: %s" real-queue)
+                (pdd-queue-acquire real-queue (cons task callback))
+                task))))
+      (error (if request
+                 (funcall (oref request fail) err)
+               (message "Caught error during pdd:around: %s" err))))))
 
 (cl-defgeneric pdd-request-transformers (_backend)
   "Return the request transformers will be used by BACKEND."

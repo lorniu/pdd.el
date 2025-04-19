@@ -275,12 +275,12 @@ When handling multiple asynchronous requests, you may encounter **callback hell*
   (let* ((r1 (await (pdd "https://httpbin.org/ip")
                     (pdd "https://httpbin.org/uuid")))
          (r2 (await (pdd "https://httpbin.org/anything"
-                      :data `((ip . ,(alist-get 'origin (car r1)))
-                              (id . ,(alist-get 'uuid (cadr r1))))))))
+                      `((ip . ,(alist-get 'origin (car r1)))
+                        (id . ,(alist-get 'uuid (cadr r1))))))))
     (message "> Got: %s" (alist-get 'form r2))))
 ```
 
-To control concurrent count of multiple requests, use `queue` ([more](docs/queue.md)):
+To control concurreny or rate limit for multiple requests, use `queue` ([more](docs/queue.md)):
 ```emacs-lisp
 (setq queue1 (pdd-queue :limit 7))
 (pdd "https://httpbin.org/ip" :queue queue1)
