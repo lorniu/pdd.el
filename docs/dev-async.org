@@ -1,0 +1,159 @@
+#+TITLE: async/await
+
+* Implement via macro transform
+
+This works well except that it lacks loop support and so on, so i migrate to state machine.
+
+#+begin_src emacs-lisp
+  (defun pdd--error-matches-spec-p (reason-data condition-spec)
+    "Check if REASON-DATA matches CONDITION-SPEC for `condition-case'."
+    (let ((error-symbol
+           (when (and (consp reason-data) (symbolp (car reason-data)))
+             (car reason-data))))
+      (cond
+       ((eq condition-spec 'error) t)
+       ((not error-symbol) nil)
+       ((symbolp condition-spec) (eq error-symbol condition-spec))
+       ((consp condition-spec) (memq error-symbol condition-spec))
+       (t nil))))
+
+  (defmacro pdd-async (&rest body)
+    "Execute BODY asynchronously, allowing `await' for `pdd-task' results."
+    (declare (indent 0) (debug t))
+    (cl-labels
+        ((find-innermost-await (form)
+           (let (innermost-found innermost-task innermost-placeholder)
+             (cl-labels
+                 ((walk (subform)
+                    (unless innermost-found
+                      (cond ((or (atom subform) (memq (car subform) '(quote function \`))) nil)
+                            ((eq (car subform) 'await)
+                             (let ((nested-await-found nil))
+                               (cl-block nil
+                                 (dolist (arg (cdr subform))
+                                   (when (find-innermost-await arg)
+                                     (setq nested-await-found t)
+                                     (cl-return))))
+                               (unless nested-await-found
+                                 (setq innermost-found subform
+                                       innermost-task (if (cddr subform)
+                                                          `(pdd-all ,@(cdr subform))
+                                                        (cadr subform))
+                                       innermost-placeholder (gensym "--await-result-")))))
+                            (t (mapc #'walk subform))))))
+               (walk form))
+             (when innermost-found
+               (list innermost-found innermost-task innermost-placeholder))))
+
+         (replace-innermost-await (form await)
+           (let ((expr (car await)) (placeholder (caddr await)))
+             (cl-labels
+                 ((walk (subform)
+                    (cond ((eq subform expr) placeholder)
+                          ((or (atom subform) (memq (car-safe subform) '(quote function \` await))) subform)
+                          (t (cons (walk (car subform))
+                                   (when (cdr subform) (mapcar #'walk (cdr subform))))))))
+               (walk form))))
+
+         (transform-expr (form)
+           (if-let* ((await (find-innermost-await form)))
+               `(:await ,(cadr await) :then (lambda (,(caddr await))
+                                              ,(replace-innermost-await form await)))
+             form))
+
+         (transform-body (forms)
+           (if (null forms) '(pdd-resolve nil)
+             (let ((form1 (car forms)) (rest-forms (cdr forms)))
+               (pcase (car-safe form1)
+                 ('let* (transform-let* (cadr form1) (append (cddr form1) rest-forms)))
+                 ('if (transform-if form1 rest-forms))
+                 ('condition-case (transform-condition-case form1 rest-forms))
+                 ('progn (transform-body (append (cdr form1) rest-forms)))
+                 (_ (transform-regular form1 rest-forms))))))
+
+         (transform-regular (form1 rest-forms)
+           (setq form1 (transform-expr form1))
+           (if (eq (car-safe form1) :await)
+               (let* ((task (plist-get form1 :await))
+                      (then (plist-get form1 :then))
+                      (placeholder (caadr then))
+                      (body (caddr then)))
+                 `(pdd-then (pdd-task-ensure ,task)
+                    (lambda (,placeholder) ,(transform-body (cons body rest-forms)))))
+             `(condition-case err
+                  (pdd-then (pdd-task-ensure ,form1)
+                    (lambda (_) ,(transform-body rest-forms)))
+                (error (pdd-reject err)))))
+
+         (transform-let* (bindings body-forms)
+           (if (null bindings) (transform-body body-forms)
+             (let* ((binding (car bindings))
+                    (var (car binding))
+                    (val-form (cadr binding))
+                    (rest-bindings (cdr bindings))
+                    (transformed-val (transform-expr val-form)))
+               (if (eq (car-safe transformed-val) :await)
+                   (let* ((task (plist-get transformed-val :await))
+                          (then (plist-get transformed-val :then))
+                          (placeholder (caadr then))
+                          (body (caddr then)))
+                     `(pdd-then (pdd-task-ensure ,task)
+                        (lambda (,placeholder)
+                          (pdd-then (pdd-task-ensure ,body)
+                            (lambda (,var) ,(transform-let* rest-bindings body-forms))))))
+                 `(condition-case err
+                      (let ((,var ,transformed-val))
+                        ,(transform-let* rest-bindings body-forms))
+                    (error (pdd-reject err)))))))
+
+         (transform-if (if-form rest-forms)
+           (let* ((condition (transform-expr (cadr if-form)))
+                  (then-form (caddr if-form))
+                  (else-form (cadddr if-form)))
+             (if (eq (car-safe condition) :await)
+                 (let* ((task (plist-get condition :await))
+                        (then (plist-get condition :then))
+                        (placeholder (caadr then))
+                        (body (caddr then)))
+                   `(pdd-then (pdd-task-ensure ,task)
+                      (lambda (,placeholder)
+                        (pdd-then (pdd-task-ensure ,body)
+                          (lambda (cond-result)
+                            (if cond-result
+                                ,(transform-body (cons then-form rest-forms))
+                              ,(if else-form
+                                   (transform-body (cons else-form rest-forms))
+                                 (transform-body rest-forms))))))))
+               `(condition-case err
+                    (if ,condition
+                        ,(transform-body (cons then-form rest-forms))
+                      ,(if else-form
+                           (transform-body (cons else-form rest-forms))
+                         (transform-body rest-forms)))
+                  (error (pdd-reject err))))))
+
+         (transform-condition-case (cc-form rest-forms)
+           (let* ((var (cadr cc-form))
+                  (protected-form (caddr cc-form))
+                  (handlers (cdddr cc-form))
+                  (transformed-protected-task (transform-body (list protected-form))))
+             `(pdd-then ,transformed-protected-task
+                (lambda (protected-result)
+                  ,(if (null rest-forms)
+                       `(pdd-resolve protected-result)
+                     (transform-body rest-forms)))
+                (lambda (reason-data)
+                  (let ((,var reason-data))
+                    (condition-case err
+                        (cond ,@(mapcar
+                                 (lambda (handler)
+                                   (let* ((condition-spec (car handler))
+                                          (handler-body (cdr handler))
+                                          (transformed-handler-chain (transform-body (append handler-body rest-forms))))
+                                     `((pdd--error-matches-spec-p reason-data ',condition-spec)
+                                       ,transformed-handler-chain)))
+                                 handlers)
+                              (t (pdd-reject reason-data)))
+                      (error (pdd-reject err)))))))))
+      `(let ((pdd-default-sync nil)) ,(transform-body body))))
+#+end_src

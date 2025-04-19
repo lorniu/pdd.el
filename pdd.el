@@ -1241,159 +1241,312 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
 
 ;; Async/Await
 
-(defun pdd--error-matches-spec-p (reason-data condition-spec)
-  "Check if REASON-DATA matches CONDITION-SPEC for `condition-case'."
-  (let ((error-symbol
-         (when (and (consp reason-data) (symbolp (car reason-data)))
-           (car reason-data))))
-    (cond
-     ((eq condition-spec 'error) t)
-     ((not error-symbol) nil)
-     ((symbolp condition-spec) (eq error-symbol condition-spec))
-     ((consp condition-spec) (memq error-symbol condition-spec))
-     (t nil))))
+(cl-defstruct pdd-asm
+  state                ; Current state number (integer)
+  main-task            ; The pdd-task for the entire async block
+  result               ; Holder for last expression/await result
+  error                ; Holder for current error being processed
+  vars-vec             ; Vector holding local variable values
+  context-stack        ; Stack for condition-case: [[err-var handlers state-after-cc handler-state-map] ...]
+  stepper-fn           ; The stepper function itself (for callbacks)
+  var-indices)         ; Hash table: var-symbol -> index in vars-vec
+
+(defun pdd--asm-analyze (body)
+  "Analyze async BODY."
+  (let ((vars (make-hash-table :test 'equal))
+        (states nil)
+        (state-counter 0)
+        (current-state-code nil)
+        (state-map (make-hash-table))
+        (current-condition-case nil))
+
+    (cl-labels
+        ((add-form (form)
+           (push form current-state-code))
+
+         (new-state ()
+           (when current-state-code
+             (push `(,state-counter ,@(nreverse current-state-code)) states)
+             (setq current-state-code nil))
+           (prog1 state-counter (cl-incf state-counter)))
+
+         (get-current-state-num () state-counter)
+
+         (register-var (var)
+           (puthash var t vars))
+
+         (set-current-condition-case (cc)
+           (setq current-condition-case cc))
+
+         (analyze-forms (forms)
+           (mapcar #'analyze-form forms))
+
+         (analyze-form (form)
+           (pcase (car-safe form)
+             ('await
+              (let* ((task-form (if (cddr form)
+                                    `(pdd-all ,@(analyze-forms (cdr form)))
+                                  (analyze-form (cadr form)))))
+                (setq states (cons (append (car states) `((:await ,task-form ,(get-current-state-num))))
+                                   (cdr states)))
+                :await-processed))
+             ('let*
+                 (let ((bindings (cadr form)) (body (cddr form)))
+                   (dolist (binding bindings)
+                     (if (consp binding)
+                         (let ((var (car binding)) (val-form (cadr binding)))
+                           (register-var var)
+                           (analyze-form val-form)
+                           (add-form `(:assign-var ,var)))
+                       (progn
+                         (register-var binding)
+                         (add-form `(:assign-var ,binding :nil)))))
+                   (analyze-forms body)
+                   :let*-processed))
+             ('if
+                 (let* ((cond-form (cadr form))
+                        (then-form (caddr form))
+                        (else-form (cadddr form))
+                        (state-after-if (gensym "state-after-if-"))
+                        (state-before-then state-counter) ; State num *before* adding jump
+                        )
+                   (analyze-form cond-form)
+                   (add-form `(:jump-if-false :placeholder-else ,state-after-if))
+                   (new-state) ; State for THEN branch starts here
+                   (analyze-form then-form)
+                   (add-form `(:jump ,state-after-if))
+                   (let ((state-before-else (new-state)))
+                     (setq states
+                           (let ((updated nil))
+                             (mapcar (lambda (s)
+                                       (if (and (not updated) (= (car s) state-before-then))
+                                           (progn
+                                             (setq updated t) ; Prevent multiple updates if structure is odd
+                                             (append (butlast (cdr s)) ; Keep code before jump
+                                                     (list `(:jump-if-false ,state-before-else ,state-after-if)))) ; Updated jump
+                                         s))
+                                     states)))
+                     (when else-form (analyze-form else-form))
+                     (let ((final-state (new-state)))
+                       (puthash state-after-if final-state state-map))
+                     :if-processed)))
+             ('condition-case
+                 (let* ((err-var (cadr form))
+                        (protected-form (caddr form))
+                        (handlers (cdddr form))
+                        (state-after-cc (gensym "state-after-cc-"))
+                        (handler-state-map (make-hash-table))
+                        (prev-condition-case current-condition-case)
+                        (cc-info `[,err-var ,handlers ,state-after-cc ,handler-state-map]))
+                   (when err-var (register-var err-var))
+                   (add-form `(:push-context ',cc-info))
+                   (new-state)
+                   (set-current-condition-case cc-info)
+                   (analyze-form protected-form)
+                   (add-form `(:pop-context))
+                   (when handlers (add-form `(:jump ,state-after-cc)))
+                   (new-state)
+                   (dolist (handler handlers)
+                     (let* ((condition (car handler))
+                            (handler-body (cdr handler))
+                            (handler-start-state (new-state)))
+                       (puthash condition handler-start-state handler-state-map)
+                       (analyze-forms handler-body)
+                       (add-form `(:jump ,state-after-cc))))
+                   (let ((final-state (new-state)))
+                     (puthash state-after-cc final-state state-map))
+                   (set-current-condition-case prev-condition-case)
+                   :condition-case-processed))
+             ('progn (analyze-forms (cdr form)) :progn-processed)
+             (_ (add-form form) :expression-processed))))
+      (analyze-forms body)
+      (new-state)
+
+      ;; --- Resolve Placeholders ---
+      (let ((resolved-states nil))
+        (dolist (state (nreverse states)) ; Process in original order
+          (push (cons (car state) ; state num
+                      (mapcar (lambda (instr)
+                                (cond
+                                 ((and (consp instr) (eq (car instr) :jump))
+                                  (let ((target (cadr instr)))
+                                    `(:jump ,(if (symbolp target) (gethash target state-map target) target))))
+                                 ((and (consp instr) (eq (car instr) :jump-if-false))
+                                  (let ((target-else (cadr instr)) (target-after (caddr instr)))
+                                    `(:jump-if-false ,(if (symbolp target-else) (gethash target-else state-map target-else) target-else)
+                                                     ,(if (symbolp target-after) (gethash target-after state-map target-after) target-after))))
+                                 ((and (consp instr) (eq (car instr) :push-context))
+                                  (let* ((quoted-cc-info (cadr instr))
+                                         (raw-info (cadr quoted-cc-info))
+                                         (raw-handler-map (cadddr raw-info))
+                                         (resolved-handler-map (make-hash-table)))
+                                    ;; Populate resolved map using actual state numbers
+                                    (maphash (lambda (k v) (puthash k v resolved-handler-map)) raw-handler-map)
+                                    `(:push-context ',(append (butlast raw-info 1) (list resolved-handler-map))))) ; Re-quote
+                                 (t instr)))
+                              (cdr state)))
+                resolved-states))
+        (setq states (nreverse resolved-states)))
+
+      `((vars . ,(delete-dups (hash-table-keys vars)))
+        (states . ,states)
+        (final-state . ,state-counter)))))
+
+(defun pdd--asm-generate (states sm-sym stepper-sym final-state var-indices)
+  "Generate STATES forms for SM-SYM.
+Use STEPPER-SYM to next with FINAL-STATE and VAR-INDICES."
+  (cl-labels ((expand-state-form (form sm-sym var-indices)
+                (cl-labels ((expand (subform)
+                              (cond
+                               ((symbolp subform)
+                                (if-let* ((index (gethash subform var-indices)))
+                                    `(aref (pdd-asm-vars-vec ,sm-sym) ,index) subform))
+                               ((consp subform)
+                                (if (or (memq (car subform) '(quote function))
+                                        (and (keywordp (car subform)) (eq (aref (symbol-name (car subform)) 0) ?:)))
+                                    subform
+                                  (cons (expand (car subform)) (mapcar #'expand (cdr subform)))))
+                               (t subform))))
+                  (expand form))))
+    (let ((clauses '()))
+      (dolist (state-info states)
+        (let* ((state-num (car state-info))
+               (code-forms (cdr state-info))
+               (generated-body '())
+               (ends-with-control nil))
+          (dolist (form code-forms)
+            (pcase form
+              ;; --- Await ---
+              (`(:await ,task-form ,next-state)
+               (setq ends-with-control t)
+               (push `(let ((task-to-await (pdd-task-ensure ,(expand-state-form task-form sm-sym var-indices))))
+                        (setf (pdd-asm-state ,sm-sym) ,next-state)
+                        (pdd-then task-to-await
+                          (lambda (result) (setf (pdd-asm-result ,sm-sym) result) (funcall ,stepper-sym))
+                          (lambda (reason) (setf (pdd-asm-error ,sm-sym) reason) (setf (pdd-asm-state ,sm-sym) -1) (funcall ,stepper-sym))))
+                     generated-body))
+
+              ;; --- Assign Var (Case 1: Assign nil) --- <<<< CORRECTED
+              (`(:assign-var ,var :nil)
+               (let ((index (gethash var var-indices)))
+                 (when index
+                   (push `(setf (aref (pdd-asm-vars-vec ,sm-sym) ,index) nil)
+                         generated-body))))
+
+              ;; --- Assign Var (Case 2: Assign last result) --- <<<< CORRECTED
+              (`(:assign-var ,var)
+               (let ((index (gethash var var-indices)))
+                 (when index
+                   (push `(setf (aref (pdd-asm-vars-vec ,sm-sym) ,index)
+                                (pdd-asm-result ,sm-sym))
+                         generated-body))))
+
+              ;; --- Conditional Jump ---
+              (`(:jump-if-false ,target-else ,_target-after)
+               (push `(unless (pdd-asm-result ,sm-sym) (setf (pdd-asm-state ,sm-sym) ,target-else))
+                     generated-body))
+
+              ;; --- Unconditional Jump ---
+              (`(:jump ,target-state)
+               (setq ends-with-control t)
+               (push `(setf (pdd-asm-state ,sm-sym) ,target-state) generated-body))
+
+              ;; --- Push/Pop Context ---
+              (`(:push-context ,quoted-resolved-cc-info)
+               (push `(push ,quoted-resolved-cc-info (pdd-asm-context-stack ,sm-sym)) generated-body))
+              (`(:pop-context)
+               (push `(pop (pdd-asm-context-stack ,sm-sym)) generated-body))
+
+              ;; --- Default: Regular Elisp Form (Expression) ---
+              (_ (let ((expanded-form (expand-state-form form sm-sym var-indices)))
+                   (push `(setf (pdd-asm-result ,sm-sym) ,expanded-form) generated-body))) ; Store result
+              ))
+          (push `(,state-num
+                  (progn
+                    ,@(nreverse generated-body)
+                    ,(unless ends-with-control
+                       `(progn
+                          (setf (pdd-asm-state ,sm-sym)
+                                (if (= state-num (1- ,final-state)) ,final-state (1+ state-num)))
+                          (funcall ,stepper-sym)))))
+                clauses)))
+      (nreverse clauses))))
+
+(defun pdd--asm-handle-error (sm stepper-sym)
+  "Process SM error in state -1, checking `condition-case' stack.
+Using STEPPER-SYM to step next."
+  (let ((err (pdd-asm-error sm))
+        (context-stack (pdd-asm-context-stack sm)))
+    (if-let* ((context-entry (car context-stack))
+              (context (cdr context-entry)) ; The actual list '[err-var...]
+              (err-var (car context))
+              (handler-state-map (cadddr context)) ; Resolved map
+              (matched-handler-info
+               (cl-block find-match
+                 (maphash (lambda (condition state-num)
+                            (when (let ((error-symbol
+                                         (when (and (consp err) (symbolp (car err)))
+                                           (car err))))
+                                    (cond
+                                     ((eq condition 'error) t)
+                                     ((not error-symbol) nil)
+                                     ((symbolp condition) (eq error-symbol condition))
+                                     ((consp condition) (memq error-symbol condition))
+                                     (t nil)))
+                              (cl-return-from find-match (list condition state-num))))
+                          handler-state-map))))
+        (let ((handler-start-state (cadr matched-handler-info)))
+          (when err-var
+            (let ((index (gethash err-var (pdd-asm-var-indices sm))))
+              (when index (setf (aref (pdd-asm-vars-vec sm) index) err))))
+          (setf (pdd-asm-context-stack sm) (cdr context-stack)) ; Pop context
+          (setf (pdd-asm-error sm) nil) ; Clear error
+          (setf (pdd-asm-state sm) handler-start-state) ; Jump to handler
+          (funcall stepper-sym))
+      (pdd-reject (pdd-asm-main-task sm) err))))
 
 (defmacro pdd-async (&rest body)
-  "Execute BODY asynchronously, allowing `await' for `pdd-task' results.
-
-This is implemented with macro expand to `pdd-then' callback."
+  "Execute BODY asynchronously using a state machine, allowing `await'."
   (declare (indent 0) (debug t))
-  (cl-labels
-      ((find-innermost-await (form)
-         (let (innermost-found innermost-task innermost-placeholder)
-           (cl-labels
-               ((walk (subform)
-                  (unless innermost-found
-                    (cond ((or (atom subform) (memq (car subform) '(quote function \`))) nil)
-                          ((eq (car subform) 'await)
-                           (let ((nested-await-found nil))
-                             (cl-block nil
-                               (dolist (arg (cdr subform))
-                                 (when (find-innermost-await arg)
-                                   (setq nested-await-found t)
-                                   (cl-return))))
-                             (unless nested-await-found
-                               (setq innermost-found subform
-                                     innermost-task (if (cddr subform)
-                                                        `(pdd-all ,@(cdr subform))
-                                                      (cadr subform))
-                                     innermost-placeholder (gensym "--await-result-")))))
-                          (t (mapc #'walk subform))))))
-             (walk form))
-           (when innermost-found
-             (list innermost-found innermost-task innermost-placeholder))))
-
-       (replace-innermost-await (form await)
-         (let ((expr (car await)) (placeholder (caddr await)))
-           (cl-labels
-               ((walk (subform)
-                  (cond ((eq subform expr) placeholder)
-                        ((or (atom subform) (memq (car-safe subform) '(quote function \` await))) subform)
-                        (t (cons (walk (car subform))
-                                 (when (cdr subform) (mapcar #'walk (cdr subform))))))))
-             (walk form))))
-
-       (transform-expr (form)
-         (if-let* ((await (find-innermost-await form)))
-             `(:await ,(cadr await) :then (lambda (,(caddr await))
-                                            ,(replace-innermost-await form await)))
-           form))
-
-       (transform-body (forms)
-         (if (null forms) '(pdd-resolve nil)
-           (let ((form1 (car forms)) (rest-forms (cdr forms)))
-             (pcase (car-safe form1)
-               ('let* (transform-let* (cadr form1) (append (cddr form1) rest-forms)))
-               ('if (transform-if form1 rest-forms))
-               ('condition-case (transform-condition-case form1 rest-forms))
-               ('progn (transform-body (append (cdr form1) rest-forms)))
-               (_ (transform-regular form1 rest-forms))))))
-
-       (transform-regular (form1 rest-forms)
-         (setq form1 (transform-expr form1))
-         (if (eq (car-safe form1) :await)
-             (let* ((task (plist-get form1 :await))
-                    (then (plist-get form1 :then))
-                    (placeholder (caadr then))
-                    (body (caddr then)))
-               `(pdd-then (pdd-task-ensure ,task)
-                  (lambda (,placeholder) ,(transform-body (cons body rest-forms)))))
-           `(condition-case err
-                (pdd-then (pdd-task-ensure ,form1)
-                  (lambda (_) ,(transform-body rest-forms)))
-              (error (pdd-reject err)))))
-
-       (transform-let* (bindings body-forms)
-         (if (null bindings) (transform-body body-forms)
-           (let* ((binding (car bindings))
-                  (var (car binding))
-                  (val-form (cadr binding))
-                  (rest-bindings (cdr bindings))
-                  (transformed-val (transform-expr val-form)))
-             (if (eq (car-safe transformed-val) :await)
-                 (let* ((task (plist-get transformed-val :await))
-                        (then (plist-get transformed-val :then))
-                        (placeholder (caadr then))
-                        (body (caddr then)))
-                   `(pdd-then (pdd-task-ensure ,task)
-                      (lambda (,placeholder)
-                        (pdd-then (pdd-task-ensure ,body)
-                          (lambda (,var) ,(transform-let* rest-bindings body-forms))))))
-               `(condition-case err
-                    (let ((,var ,transformed-val))
-                      ,(transform-let* rest-bindings body-forms))
-                  (error (pdd-reject err)))))))
-
-       (transform-if (if-form rest-forms)
-         (let* ((condition (transform-expr (cadr if-form)))
-                (then-form (caddr if-form))
-                (else-form (cadddr if-form)))
-           (if (eq (car-safe condition) :await)
-               (let* ((task (plist-get condition :await))
-                      (then (plist-get condition :then))
-                      (placeholder (caadr then))
-                      (body (caddr then)))
-                 `(pdd-then (pdd-task-ensure ,task)
-                    (lambda (,placeholder)
-                      (pdd-then (pdd-task-ensure ,body)
-                        (lambda (cond-result)
-                          (if cond-result
-                              ,(transform-body (cons then-form rest-forms))
-                            ,(if else-form
-                                 (transform-body (cons else-form rest-forms))
-                               (transform-body rest-forms))))))))
-             `(condition-case err
-                  (if ,condition
-                      ,(transform-body (cons then-form rest-forms))
-                    ,(if else-form
-                         (transform-body (cons else-form rest-forms))
-                       (transform-body rest-forms)))
-                (error (pdd-reject err))))))
-
-       (transform-condition-case (cc-form rest-forms)
-         (let* ((var (cadr cc-form))
-                (protected-form (caddr cc-form))
-                (handlers (cdddr cc-form))
-                (transformed-protected-task (transform-body (list protected-form))))
-           `(pdd-then ,transformed-protected-task
-              (lambda (protected-result)
-                ,(if (null rest-forms)
-                     `(pdd-resolve protected-result)
-                   (transform-body rest-forms)))
-              (lambda (reason-data)
-                (let ((,var reason-data))
-                  (condition-case err
-                      (cond ,@(mapcar
-                               (lambda (handler)
-                                 (let* ((condition-spec (car handler))
-                                        (handler-body (cdr handler))
-                                        (transformed-handler-chain (transform-body (append handler-body rest-forms))))
-                                   `((pdd--error-matches-spec-p reason-data ',condition-spec)
-                                     ,transformed-handler-chain)))
-                               handlers)
-                       (t (pdd-reject reason-data)))
-                    (error (pdd-reject err)))))))))
-    `(let ((pdd-default-sync nil)) ,(transform-body body))))
+  ;; --- 1. Analysis ---
+  (let* ((analysis (pdd--asm-analyze body))
+         (vars (cdr (assoc 'vars analysis)))
+         (states (cdr (assoc 'states analysis)))
+         (final-state (cdr (assoc 'final-state analysis)))
+         (sm-sym (gensym "sm-"))
+         (stepper-sym (gensym "stepper-"))
+         (error-sym (gensym "err-"))
+         (var-indices (let ((ht (make-hash-table :test 'equal)))
+                        (cl-loop for v in vars for i from 0 do (puthash v i ht))
+                        ht)))
+    ;; --- 2. Code Generation ---
+    `(let ((pdd-default-sync nil))
+       (pdd-with-new-task
+        (let* ((var-indices-runtime ',var-indices)
+               (,sm-sym (make-pdd-asm
+                         :state 0 :main-task it :result nil :error nil
+                         :vars-vec (make-vector ,(length vars) nil)
+                         :context-stack nil :stepper-fn nil
+                         :var-indices var-indices-runtime))
+               (,stepper-sym))
+          (setf ,stepper-sym
+                (lambda ()
+                  (let ((var-indices (pdd-asm-var-indices ,sm-sym)))
+                    (declare (ignorable var-indices))
+                    (condition-case ,error-sym
+                        (pcase (pdd-asm-state ,sm-sym)
+                          (-1 (pdd--asm-handle-error ,sm-sym ,stepper-sym))
+                          (,final-state (pdd-resolve (pdd-asm-main-task ,sm-sym) (pdd-asm-result ,sm-sym)))
+                          ,@(pdd--asm-generate states sm-sym stepper-sym final-state var-indices)
+                          (_ (pdd-reject (pdd-asm-main-task ,sm-sym) `(internal-error "Invalid state: %s" (pdd-asm-state ,sm-sym)))))
+                      (error
+                       (progn
+                         (unless (and (boundp ',sm-sym) ,sm-sym) (error "SM Error Handling Failed: %S" ,error-sym))
+                         (setf (pdd-asm-error ,sm-sym) ,error-sym)
+                         (setf (pdd-asm-state ,sm-sym) -1)
+                         (funcall ,stepper-sym)))))))
+          (setf (pdd-asm-stepper-fn ,sm-sym) ,stepper-sym)
+          (funcall ,stepper-sym))))))
 
 ;; Cookie
 
