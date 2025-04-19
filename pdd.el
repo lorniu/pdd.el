@@ -688,25 +688,9 @@ Otherwise, create a new `pdd-task' which is rejected because of (car args)."
                   (lambda (v) (pdd-resolve task v))
                   (lambda (r) (pdd-reject task r))))
                ('fulfilled
-                (pdd-resolve task (aref obj 2)))
+                (apply #'pdd-resolve task (aref obj 2)))
                ('rejected
                 (pdd-reject task (aref obj 3)))))
-            ((or (cl-typep obj 'eieio-object) (functionp obj))
-             (condition-case err1
-                 (let ((called nil)
-                       (then (ignore-errors (with-no-warnings (eieio-oref obj 'then)))))
-                   (if (functionp then)
-                       (funcall then obj
-                                (lambda (r)
-                                  (unless called
-                                    (setq called t)
-                                    (pdd-resolve task r)))
-                                (lambda (r)
-                                  (unless called
-                                    (setq called t)
-                                    (pdd-reject task r))))
-                     (pdd-resolve task obj)))
-               (error (pdd-reject task err1))))
             (t (pdd-task--settle task 'fulfilled values))))))
 
 (defun pdd-reject (&rest args)
