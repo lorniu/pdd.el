@@ -366,9 +366,9 @@ Scrape all images from a webpage:
                             params
                             headers
                             data
-                            as
                             init
                             filter
+                            as
                             done
                             fail
                             fine
@@ -377,6 +377,7 @@ Scrape all images from a webpage:
                             retry
                             proxy
                             queue
+                            cookie-jar
                             verbose
                             &allow-other-keys)
   "Send HTTP request using the specified BACKEND.
@@ -419,6 +420,7 @@ Keyword Arguments:
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
+  :COOKIE-JAR - An object used to manage http cookies
   :VERBOSE - Display extra informations like headers when request, boolean/function
 
 Returns:

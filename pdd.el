@@ -223,10 +223,10 @@ Returns the multipart data as a unibyte string."
       (setq date-time (append '(0 0 0) (nthcdr 3 date-time))))
     (apply #'encode-time date-time)))
 
-(defun pdd-split-string-from-= (string &optional url-decode)
-  "Split STRING at the first = into two parts.
+(defun pdd-split-string-by (string &optional substring url-decode)
+  "Split STRING at the first SUBSTRING into two parts.
 Try to unhex the second part when URL-DECODE is not nil."
-  (let* ((p (cl-position ?= string))
+  (let* ((p (cl-search (or substring " ") string))
          (k (if p (substring string 0 p) string))
          (v (if p (substring string (1+ p)))))
     (cons k (when (and v (not (string-empty-p v)))
@@ -274,10 +274,10 @@ Link:
 Return a plist containing all cookie attributes."
   (when (and (stringp cookie-string) (not (string-empty-p cookie-string)))
     (when-let* ((pairs (split-string (string-trim cookie-string) ";\\s *" t))
-                (names (pdd-split-string-from-= (car pairs) url-decode))
+                (names (pdd-split-string-by (car pairs) "=" url-decode))
                 (cookie (list :name (car names) :value (cdr names))))
       (cl-loop for pair in (cdr pairs)
-               for (k . v) = (pdd-split-string-from-= pair url-decode)
+               for (k . v) = (pdd-split-string-by pair "=" url-decode)
                do (pcase (setq k (intern (concat ":" (downcase k))))
                     (:domain
                      (when v (plist-put cookie k v)))
@@ -394,6 +394,7 @@ Example:
                      when (consp item)
                      collect (if (car-safe (cdr item)) item
                                (list (car item) (cdr item))))))
+  (declare (indent 1))
   (user-error "No support for type %s" type))
 
 
@@ -480,6 +481,8 @@ The value can be either:
 This variable is used as a fallback when no queue is explicitly provided
 in individual requests.")
 
+(defvar pdd-default-verbose nil)
+
 (defvar pdd-default-error-handler #'pdd--default-error-handler
   "Default error handler that display errors when they are not handled by user.
 
@@ -555,6 +558,8 @@ reorder the built-in transformers unless you fully understand the consequences."
       pdd-default-timeout
       pdd-default-retry
       pdd-default-cookie-jar
+      pdd-default-queue
+      pdd-default-verbose
       pdd-default-error-handler
       pdd-default-headers
       pdd-default-data
@@ -1658,23 +1663,23 @@ to be called when task is acquired."
    (data       :initarg :data        :type (or function string list) :initform nil)
    (datas      :initform nil         :type (or string null))
    (binaryp    :initform nil         :type boolean)
-   (as         :initarg :as          :type (or function null) :initform nil)
-   (timeout    :initarg :timeout     :type (or number null)   :initform nil)
-   (retry      :initarg :retry       :type (or number null)   :initform nil)
    (init       :initarg :init        :type (or function null) :initform nil)
    (filter     :initarg :filter      :type (or function null) :initform nil)
+   (as         :initarg :as          :type (or function symbol null) :initform nil)
    (done       :initarg :done        :type (or function null) :initform nil)
    (fail       :initarg :fail        :type (or function null) :initform nil)
    (fine       :initarg :fine        :type (or function null) :initform nil)
    (sync       :initarg :sync)
-   (buffer     :initarg :buffer      :initform nil)
-   (backend    :initarg :backend     :type (or pdd-http-backend null))
-   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null) :initform nil)
+   (timeout    :initarg :timeout     :type (or number null)   :initform nil)
+   (retry      :initarg :retry       :type (or number null)   :initform nil)
    (proxy      :initarg :proxy       :type (or string list null) :initform nil)
    (queue      :initarg :queue       :type (or pdd-queue null) :initform nil)
+   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null) :initform nil)
+   (buffer     :initarg :buffer      :initform nil)
    (process    :initarg :process     :initform nil)
-   (abort-flag :initarg :abort-flag  :initform nil)
    (task       :initarg :task        :initform nil)
+   (backend    :initarg :backend     :type (or pdd-http-backend null))
+   (abort-flag :initarg :abort-flag  :initform nil)
    (verbose    :initarg :verbose     :type (or function boolean) :initform nil))
   "Abstract base class for HTTP request configs.")
 
@@ -1882,19 +1887,23 @@ to be called when task is acquired."
       (setf binaryp (not (multibyte-string-p datas))))))
 
 (cl-defmethod pdd-transform-req-verbose ((request pdd-request))
-  "Request output in verbose mode for REQUEST."
-  (with-slots (verbose headers buffer) request
+  "Request output in verbose mode for REQUEST.
+Make sure this is after data and headers being processed."
+  (with-slots (url datas verbose headers buffer) request
     (when verbose
-      (let ((hs (mapconcat (lambda (header)
-                             (format "> %s: %s" (car header) (cdr header)))
-                           headers "\n")))
+      (let* ((hs (mapconcat (lambda (header)
+                              (format "> %s: %s" (car header) (cdr header)))
+                            headers "\n"))
+             (ds (when (> (length datas) 0)
+                   (concat "* " (car (pdd-split-string-by datas "\n")) "\n")))
+             (str (concat "\n* " url "\n" hs "\n" ds)))
         (with-current-buffer buffer
-          (funcall (if (functionp verbose) verbose #'princ) (concat hs "\n")))))))
+          (funcall (if (functionp verbose) verbose #'princ) str))))))
 
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data timeout retry sync init done filter abort-flag buffer backend task queue) request
+  (with-slots (url method params headers data timeout retry sync init done filter abort-flag buffer backend task queue verbose) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when params
@@ -1907,6 +1916,7 @@ to be called when task is acquired."
     (unless timeout (setf timeout pdd-default-timeout))
     (unless retry (setf retry pdd-default-retry))
     (unless queue (setf queue pdd-default-queue))
+    (unless verbose (setf verbose pdd-default-verbose))
     ;; init other slots
     (unless (slot-boundp request 'sync)
       (setf sync (if (eq pdd-default-sync 'unset)
@@ -2004,11 +2014,12 @@ to be called when task is acquired."
             (pdd-funcall as (list :body pdd-resp-body :headers pdd-resp-headers :buffer (current-buffer))))
            ((and as (symbolp as))
             (pdd-string-to-object as pdd-resp-body))
-           (t (let* ((ct (alist-get 'content-type pdd-resp-headers))
-                     (type (cond ((string-match-p "/json" ct) 'json)
-                                 ((string-match-p "\\(application\\|text\\)/xml" ct) 'xml)
-                                 (t (intern (car (split-string ct "[; ]")))))))
-                (pdd-string-to-object type pdd-resp-body)))))))
+           (t (if-let* ((ct (alist-get 'content-type pdd-resp-headers))
+                        (type (cond ((string-match-p "/json" ct) 'json)
+                                    ((string-match-p "\\(application\\|text\\)/xml" ct) 'xml)
+                                    (t (intern (car (split-string ct "[; ]")))))))
+                  (pdd-string-to-object type pdd-resp-body)
+                pdd-resp-body))))))
 
 (cl-defmethod pdd-transform-response (request)
   "Run all response transformers for REQUEST to get the results."
@@ -2027,9 +2038,9 @@ to be called when task is acquired."
                             params
                             headers
                             data
-                            as
                             init
                             filter
+                            as
                             done
                             fail
                             fine
@@ -2038,6 +2049,7 @@ to be called when task is acquired."
                             retry
                             proxy
                             queue
+                            cookie-jar
                             verbose
                             &allow-other-keys)
   "Send request using the specified BACKEND.
@@ -2082,6 +2094,7 @@ Keyword Arguments:
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
+  :COOKIE-JAR - An object used to auto manage http cookies
   :VERBOSE - Display extra informations like headers when request, bool/function
 
 Returns:
