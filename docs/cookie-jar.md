@@ -42,6 +42,10 @@ Use cookie-jar in request:
 (pdd "https://example.com/profile"
   :cookie-jar my-cookie-jar ; cookies will be managed automatically in future requests
   :done (lambda (data) (message "Profile: %S" data)))
+
+;; inspect cookie headers with :verbose t
+(setq cj-1 (pdd-cookie-jar))
+(pdd "https://bing.com" :done #'ignore :cookie-jar cj-1 :verbose t)
 ```
 
 Use `pdd-default-cookie-jar` to make things easier:

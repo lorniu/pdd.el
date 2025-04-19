@@ -1819,7 +1819,7 @@ to be called when task is acquired."
             (push (cons "Cookie"
                         (mapconcat
                          (lambda (c)
-                           (format "%s=%s" (plist-get c :name) (plist-get c :value)))
+                           (format "%s=%s" (plist-get c :name) (or (plist-get c :value) "")))
                          cookies "; "))
                   headers)))))))
 
