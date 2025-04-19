@@ -31,7 +31,7 @@ Case just for demo:
   ;; maybe some other tasks, take delay for example
   (lambda (r) (pdd-delay-task 3 r))
 
-  ;; maybe some other tasks, task another request for example
+  ;; maybe some other tasks, take another request for example
   (lambda (r) (pdd "https://httpbin.org/anything" :data (format "%s" r)))
 
   ;; write to file using command. t says: wrap the command with shell

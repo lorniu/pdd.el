@@ -2006,7 +2006,7 @@ to be called when task is acquired."
             (pdd-string-to-object as pdd-resp-body))
            (t (let* ((ct (alist-get 'content-type pdd-resp-headers))
                      (type (cond ((string-match-p "/json" ct) 'json)
-                                 ((string-match-p "/xml\\|\\+xml" ct) 'xml)
+                                 ((string-match-p "\\(application\\|text\\)/xml" ct) 'xml)
                                  (t (intern (car (split-string ct "[; ]")))))))
                 (pdd-string-to-object type pdd-resp-body)))))))
 
@@ -2168,6 +2168,7 @@ ARGS should a request instances or keywords to build the request."
 (defvar tls-params)
 
 (defvar pdd-url-extra-filter nil)
+(defvar pdd-url-inhibit-proxy-fallback nil)
 
 (cl-defmethod pdd-proxy-vars ((_ pdd-url-backend) (request pdd-request))
   "Serialize proxy config for url REQUEST."
@@ -2198,7 +2199,7 @@ ARGS should a request instances or keywords to build the request."
            `(http "Maybe something wrong with network" 400))
           ((or (null url-http-end-of-headers) (= 1 (point-max)))
            (setf abort-flag 'conn)
-           `(http "Response unusual empty content" 417))
+           `(http "Response empty content, maybe something error" 417))
           ((plist-get status :error)
            (setf abort-flag 'resp)
            (let* ((err (plist-get status :error))
@@ -2240,8 +2241,13 @@ ARGS should a request instances or keywords to build the request."
                      (lambda (name buffer host service)
                        (let ((proc (funcall origin-socks-open-network-stream name buffer host service)))
                          (if (string-prefix-p "https" url)
-                             (let ((tls-params (list :hostname host :verify-error nil)))
-                               (gnutls-negotiate :process proc :type 'gnutls-x509pki :hostname host))
+                             (condition-case err
+                                 (let ((tls-params (list :hostname host :verify-error nil)))
+                                   (gnutls-negotiate :process proc :type 'gnutls-x509pki :hostname host))
+                               (error (if pdd-url-inhibit-proxy-fallback
+                                          (signal (car err) (cdr err))
+                                        (message "gnutls negotiate fail, skip proxy: %s" err)
+                                        proc)))
                            proc)))
                    origin-socks-open-network-stream)))
         (cond ((consp proxy)
@@ -2263,8 +2269,7 @@ ARGS should a request instances or keywords to build the request."
                            (setq data-buffer (current-buffer))
                            (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
                            (if abort-flag
-                               (progn (pdd-log 'url-backend "skip done (aborted).")
-                                      (funcall fail nil))
+                               (pdd-log 'url-backend "skip done (aborted or timeout).")
                              (unwind-protect
                                  (condition-case err1
                                      (if-let* ((err (pdd-transform-error backend request status)))
@@ -2294,15 +2299,13 @@ ARGS should a request instances or keywords to build the request."
           (when (numberp timeout)
             (let ((timer-callback
                    (lambda ()
-                     (pdd-log 'timer "kill timeout.")
+                     (pdd-log 'timer "timeout triggered.")
                      (unless data-buffer
-                       (ignore-errors (stop-process process))
-                       (ignore-errors
-                         (with-current-buffer proc-buffer
-                           (erase-buffer)
-                           (setq-local url-http-end-of-headers 30)
-                           (insert "HTTP/1.1 408 Operation timeout")))
-                       (ignore-errors (delete-process process))))))
+                       (setf abort-flag 'timeout)
+                       (funcall fail '(timeout "Request timeout" 408))
+                       (when (and process (process-live-p process))
+                         (ignore-errors (stop-process process))
+                         (run-at-time 0.1 nil #'delete-process process))))))
               (setq timer (run-with-timer timeout nil timer-callback))))
           (if (and sync proc-buffer)
               ;; copy from `url-retrieve-synchronously'
