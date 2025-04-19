@@ -322,6 +322,42 @@ Download file with progress bar display:
               (progress-reporter-done reporter)))))
 ```
 
+Scrape all images from a webpage:
+```emacs-lisp
+;; use `queue' to limit the concurrency to make sure success.
+;; this code is not perfect, but it demonstrates how to do it.
+;; also, the scrape is asynchronous, will not block emacs.
+
+(defun my-scrape-site-images (url dir &optional concurrency-limit)
+  (pdd-async
+    (let* ((raw-html (await (pdd url)))
+           (dom (with-temp-buffer
+                  (require 'dom)
+                  (insert raw-html)
+                  (xml-remove-comments (point-min) (point-max))
+                  (libxml-parse-html-region)))
+           (urls (mapcar (lambda (img) (alist-get 'src (cadr img)))
+                         (dom-by-tag dom 'img)))
+           (pdd-base-url (let ((parsed (url-generic-parse-url url)))
+                           (format "%s://%s" (url-type parsed) (url-host parsed))))
+           (pdd-default-queue (pdd-queue :limit (or concurrency-limit 10)
+                                         :fine (lambda () (message "Done.")))))
+      (make-directory dir t)
+      (dolist (url urls)
+        (pdd url
+          (lambda (r)
+            (let ((coding-system-for-write 'no-conversion)
+                  (loc (expand-file-name
+                        (decode-coding-string
+                         (url-unhex-string (file-name-nondirectory url)) 'utf-8)
+                        dir)))
+              (write-region r nil loc))))))))
+
+(my-scrape-site-images
+ "https://commons.wikimedia.org/wiki/Commons:Picture_of_the_Year/2022/R2/Gallery"
+ "~/my-pdd-images/")
+```
+
 ## API
 
 ``` emacs-lisp
