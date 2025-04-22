@@ -2128,7 +2128,7 @@ ARGS should a request instances or keywords to build the request."
                                  (pdd--with-restored-dynamic-context context
                                    (if init (pdd-funcall init (list request)))
                                    (setf abort-flag nil)
-                                   (setf process (cl-call-next-method backend :request request))))))
+                                   (run-at-time 0.01 nil (lambda () (setf process (cl-call-next-method backend :request request))))))))
                 (pdd-log 'queue "acquire queue: %s" real-queue)
                 (pdd-queue-acquire real-queue (cons task callback))
                 task))))
