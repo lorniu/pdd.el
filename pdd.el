@@ -816,6 +816,13 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
                  (user-error "Every callback should be a function"))))
     (if reject (pdd-then task #'identity reject) task)))
 
+(defun pdd-task--flatten-tasks (args)
+  "Flatten ARGS to a list and make sure every item is task."
+  (let (lst)
+    (dolist (arg args)
+      (setq lst (append lst (ensure-list arg))))
+    (mapcar #'pdd-task-ensure lst)))
+
 (defun pdd-all (&rest tasks)
   "Wait for all TASKS to complete and return a new task.
 
@@ -824,7 +831,7 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
    (if (null tasks)
        (pdd-resolve it nil)
      (let* ((pdd-default-sync nil)
-            (tasks (mapcar #'pdd-task-ensure tasks))
+            (tasks (pdd-task--flatten-tasks tasks))
             (results (make-vector (length tasks) nil))
             (remaining (length tasks))
             (has-settled nil))
@@ -853,7 +860,7 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
    (if (null tasks)
        (pdd-reject it "No tasks provided")
      (let* ((pdd-default-sync nil)
-            (tasks (mapcar #'pdd-task-ensure tasks))
+            (tasks (pdd-task--flatten-tasks tasks))
             (errors (make-vector (length tasks) nil))
             (remaining (length tasks))
             (has-fulfilled nil))
@@ -881,7 +888,7 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
    (if (null tasks)
        (pdd-reject it "No tasks provided")
      (let* ((pdd-default-sync nil)
-            (tasks (mapcar #'pdd-task-ensure tasks))
+            (tasks (pdd-task--flatten-tasks tasks))
             (has-settled nil))
        (cl-loop for task in tasks
                 do (pdd-then task
