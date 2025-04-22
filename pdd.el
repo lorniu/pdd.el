@@ -361,7 +361,7 @@ Example:
   (pdd-funcall (lambda (err &key bbb) (format \"%s:%s\" err bbb))
     \\='(:code 404 :message \"notfound\" :aaa 2 :bbb 4)) ;; => \"404:4\""
   (declare (indent 1))
-  (let* ((signature (help-function-arglist function))
+  (let* ((signature (delq '&optional (help-function-arglist function)))
          (pos-list (cl-remove-if #'keywordp args))
          (kwd-plist (when-let* ((pos (cl-position-if #'keywordp args)))
                       (cl-subseq args pos)))
@@ -369,7 +369,7 @@ Example:
                               for arg in signature for i from 0
                               if (eq arg '&key) do (setq keywordp t) and collect nil
                               else if keywordp collect (plist-get kwd-plist (intern (format ":%s" arg)))
-                              else collect (nth i pos-list))))
+                              else collect (ignore-errors (nth i pos-list)))))
     (apply function final-args)))
 
 (cl-defgeneric pdd-string-to-object (_type string)
@@ -931,7 +931,7 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
     (lambda (reason &optional context)
       (unwind-protect
           (if fail
-              (funcall fail reason context)
+              (pdd-funcall fail (list reason context))
             (if (consp reason)
                 (signal (car reason) (cdr reason))
               (user-error "%s" reason)))
