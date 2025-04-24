@@ -1671,6 +1671,7 @@ to be called when task is acquired."
    (task       :initarg :task        :initform nil)
    (backend    :initarg :backend     :type (or pdd-http-backend null))
    (abort-flag :initarg :abort-flag  :initform nil)
+   (begtime    :type (or null float))
    (verbose    :initarg :verbose     :type (or function boolean) :initform nil))
   "Abstract base class for HTTP request configs.")
 
@@ -2081,7 +2082,7 @@ Keyword Arguments:
   :FINE    - Final callback (always called), signature:
              (&optional request)
   :SYNC    - Whether to execute synchronously (boolean)
-  :TIMEOUT - Timeout in seconds
+  :TIMEOUT - Maximum time in seconds allow to connect
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
@@ -2115,7 +2116,7 @@ Examples:
 ARGS should a request instances or keywords to build the request."
   (let (request)
     (condition-case err
-        (with-slots (sync init process task queue abort-flag)
+        (with-slots (sync init process task queue abort-flag begtime)
             (setq request
                   (if (cl-typep (car args) 'pdd-request)
                       (car args)
@@ -2124,20 +2125,19 @@ ARGS should a request instances or keywords to build the request."
           (let ((real-queue (if (functionp queue)
                                 (pdd-funcall queue (list request))
                               queue)))
-            (if (or sync (null real-queue)
-                    (memq task (oref real-queue running))) ; for retry logic
+            (if (or sync (null real-queue) (memq task (oref real-queue running))) ; for retry logic
                 (let ((result (progn (if init (pdd-funcall init (list request)))
-                                     (setf abort-flag nil)
+                                     (setf abort-flag nil begtime (float-time))
                                      (cl-call-next-method backend :request request))))
                   (if sync result (setf process result) task))
               (let* ((context (pdd--capture-dynamic-context))
                      (callback (lambda ()
                                  (pdd--with-restored-dynamic-context context
                                    (if init (pdd-funcall init (list request)))
-                                   (setf abort-flag nil)
-                                   (run-at-time 0.01 nil (lambda () (setf process (cl-call-next-method backend :request request))))))))
+                                   (setf abort-flag nil begtime (float-time))
+                                   (setf process (cl-call-next-method backend :request request))))))
                 (pdd-log 'queue "acquire queue: %s" real-queue)
-                (pdd-queue-acquire real-queue (cons task callback))
+                (pdd-queue-acquire real-queue (cons task (lambda () (run-at-time 0 nil callback))))
                 task))))
       (error (if request
                  (funcall (oref request fail) err)
@@ -2173,6 +2173,7 @@ ARGS should a request instances or keywords to build the request."
 
 (defvar pdd-url-extra-filter nil)
 (defvar pdd-url-inhibit-proxy-fallback nil)
+(defvar-local pdd-url-timeout-timer nil)
 
 (cl-defmethod pdd-proxy-vars ((_ pdd-url-backend) (request pdd-request))
   "Serialize proxy config for url REQUEST."
@@ -2198,17 +2199,21 @@ ARGS should a request instances or keywords to build the request."
 (cl-defmethod pdd-transform-error ((_ pdd-url-backend) (request pdd-request) status)
   "Extract error object from callback STATUS for REQUEST."
   (with-slots (url abort-flag) request
-    (cond ((and (null status) (= (point-max) 1))
-           (setf abort-flag 'conn) ; sometimes, status is nil. I don't know exactly why.
+    (cond ((plist-get status :error)
+           (let* ((err (plist-get status :error))
+                  (code (caddr err)))
+             (if (numberp code)
+                 (progn
+                   (setq abort-flag 'resp)
+                   `(,(car err) ,(pdd-http-code-text code) ,code))
+               (setq abort-flag 'req)
+               `(,(car err) ,(format "%s" (cdr err))))))
+          ((and (null status) (= (point-max) 1)) ; sometimes, status is nil. I don't know exactly why.
+           (setf abort-flag 'conn)
            `(http "Maybe something wrong with network" 400))
           ((or (null url-http-end-of-headers) (= 1 (point-max)))
            (setf abort-flag 'conn)
-           `(http "Response empty content, maybe something error" 417))
-          ((plist-get status :error)
-           (setf abort-flag 'resp)
-           (let* ((err (plist-get status :error))
-                  (code (caddr err)))
-             `(,(car err) ,(pdd-http-code-text code) ,code))))))
+           `(http "Response empty content, maybe something error" 417)))))
 
 (defun pdd-url-http-extra-filter (beg end len)
   "Call `pdd-url-extra-filter'.  BEG, END and LEN see `after-change-functions'."
@@ -2219,6 +2224,11 @@ ARGS should a request instances or keywords to build the request."
       (save-restriction
         (narrow-to-region url-http-end-of-headers (point-max))
         (funcall pdd-url-extra-filter)))))
+
+(defun pdd-url-cancel-timeout-timer (_ _)
+  "Cancel timer for :timeout when any data returned in filter."
+  (remove-hook 'before-change-functions #'pdd-url-cancel-timeout-timer t)
+  (ignore-errors (cancel-timer pdd-url-timeout-timer)))
 
 (cl-defmethod pdd ((backend pdd-url-backend) &key request)
   "Send REQUEST with url.el as BACKEND."
@@ -2266,26 +2276,26 @@ ARGS should a request instances or keywords to build the request."
                (url-user-agent (alist-get "user-agent" headers nil nil #'pdd-string-iequal))
                (url-request-extra-headers (assoc-delete-all "user-agent" headers #'pdd-string-iequal))
                (url-mime-encoding-string "identity")
-               timer buffer-data data-buffer
+               buffer-data data-buffer
                (callback (lambda (status)
-                           (pdd-log 'url-backend "callback.")
-                           (ignore-errors (cancel-timer timer))
-                           (setq data-buffer (current-buffer))
-                           (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
-                           (if abort-flag
-                               (pdd-log 'url-backend "skip done (aborted or timeout).")
-                             (unwind-protect
-                                 (condition-case err1
-                                     (if-let* ((err (pdd-transform-error backend request status)))
-                                         (progn (pdd-log 'url-backend "before fail")
-                                                (funcall fail err))
-                                       (pdd-log 'url-backend "before done")
-                                       (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
-                                   (error (funcall fail err1)))
-                               (unless sync (kill-buffer data-buffer))))))
+                           (unwind-protect
+                               (progn
+                                 (pdd-log 'url-backend "callback.")
+                                 (ignore-errors (cancel-timer pdd-url-timeout-timer))
+                                 (setq data-buffer (current-buffer))
+                                 (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
+                                 (if abort-flag
+                                     (pdd-log 'url-backend "skip done (aborted or timeout).")
+                                   (condition-case err1
+                                       (if-let* ((err (pdd-transform-error backend request status)))
+                                           (progn (pdd-log 'url-backend "before fail")
+                                                  (funcall fail err))
+                                         (pdd-log 'url-backend "before done")
+                                         (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
+                                     (error (funcall fail err1)))))
+                             (kill-buffer data-buffer))))
                (proc-buffer (url-retrieve url callback nil t t))
                (process (get-buffer-process proc-buffer)))
-          ;; log
           (pdd-log 'url-backend
             "%s %s"             url-request-method url
             "HEADER: %S"        url-request-extra-headers
@@ -2294,23 +2304,30 @@ ARGS should a request instances or keywords to build the request."
             "Proxy: %S"         proxy
             "User Agent: %s"    url-user-agent
             "MIME Encoding: %s" url-mime-encoding-string)
-          ;; :filter support via hook
-          (when (and filter (buffer-live-p proc-buffer))
-            (with-current-buffer proc-buffer
-              (setq-local pdd-url-extra-filter filter)
-              (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)))
-          ;; :timeout support via timer
-          (when (numberp timeout)
-            (let ((timer-callback
-                   (lambda ()
-                     (pdd-log 'timer "timeout triggered.")
-                     (unless data-buffer
-                       (setf abort-flag 'timeout)
-                       (funcall fail '(timeout "Request timeout" 408))
-                       (when (and process (process-live-p process))
-                         (ignore-errors (stop-process process))
-                         (run-at-time 0.1 nil #'delete-process process))))))
-              (setq timer (run-with-timer timeout nil timer-callback))))
+          (when (buffer-live-p proc-buffer)
+            (oset request process process)
+            ;; :timeout support via timer
+            (when (numberp timeout)
+              (let ((timer-callback
+                     (lambda ()
+                       (let ((proc (oref request process)) buf)
+                         (when (and (not data-buffer) (not abort-flag) proc)
+                           (pdd--with-restored-dynamic-context context
+                             (setf abort-flag 'timeout)
+                             (ignore-errors (setq buf (process-buffer proc)))
+                             (ignore-errors (stop-process proc))
+                             (ignore-errors (delete-process proc))
+                             (ignore-errors (kill-buffer buf))
+                             (pdd-log 'timeout "TIMEOUT timer triggered")
+                             (funcall fail '(timeout "Request timeout" 408))))))))
+                (with-current-buffer proc-buffer
+                  (add-hook 'before-change-functions #'pdd-url-cancel-timeout-timer nil t)
+                  (setq pdd-url-timeout-timer (run-at-time timeout nil timer-callback)))))
+            ;; :filter support via hook
+            (when filter
+              (with-current-buffer proc-buffer
+                (setq-local pdd-url-extra-filter filter)
+                (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t))))
           (if (and sync proc-buffer)
               ;; copy from `url-retrieve-synchronously'
               (catch 'pdd-done
@@ -2427,7 +2444,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
                            :as results
                            :filter filter-fn
                            :then 'sync
-                           :timeout timeout)))
+                           :connect-timeout timeout)))
                 (if abort-flag
                     (pdd-log tag "skip done (aborted).")
                   (pdd-log tag "before done")
@@ -2451,7 +2468,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
           :else (lambda (err)
                   (pdd-log tag "before fail")
                   (funcall fail (pdd-transform-error backend request err)))
-          :timeout timeout)))))
+          :connect-timeout timeout)))))
 
 
 

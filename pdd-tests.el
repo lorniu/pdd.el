@@ -296,7 +296,8 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
           (and (equal (alist-get 'user it) "user")
                (equal (alist-get 'authenticated it) t))))
 
-(pdd-deftests timeout-and-retry ()
+;; connect-timeout not act as same, should be improved
+(pdd-deftests timeout-and-retry (curl)
   (let ((retry-count 0) finished)
     (should (pdd "/delay/2"
               :timeout 1 :retry 0

@@ -103,7 +103,7 @@ And try to send requests like this:
   :fail (lambda (err) (message "%s" err))
   :fine (lambda () (message "kindness, please")))
 
-;; Use :timeout to set how long one request can wait (seconds)
+;; Use :timeout to set how long one request can wait to connect (seconds)
 ;; Use :retry to set times auto resend the request if timeout
 
 (pdd "https://httpbin.org/ip" :done #'print :timeout 0.9 :retry 5)
@@ -416,7 +416,7 @@ Keyword Arguments:
   :FINE    - Final callback (always called), signature:
              (&optional request)
   :SYNC    - Whether to execute synchronously (boolean)
-  :TIMEOUT - Timeout in seconds
+  :TIMEOUT - Maximum time in seconds allow to connect
   :RETRY   - Number of retry attempts on timeout
   :PROXY   - Proxy used by current http request (string or function)
   :QUEUE   - Semaphore object used to limit concurrency (async only)
