@@ -97,33 +97,30 @@
   "Debug flag."
   :type '(choice boolean symbol))
 
-(defvar pdd-debug-buffer nil
-  "Where to show the log message.")
+(defvar pdd-log-redirect-function nil
+  "Redirect output of `pdd-log' to this function.
+With function signature: (tag message-string)")
 
-(defun pdd-log (tag &rest args)
-  "Output log to *Messages* buffer using syntax of `message'.
-TAG usually is the name of current http backend.  ARGS should be fmt and
-rest arguments."
-  (declare (indent 1))
-  (when (and pdd-debug
-             (or (eq tag pdd-debug)
-                 (and (eq pdd-debug t) (not (eq tag 'task)))))
-    (cl-loop with sub = nil
-             with fmt = (format "[%s] " (or tag "pdd"))
-             with display = (lambda (args)
-                              (setq args (nreverse args)
-                                    args (cons (concat fmt (car args)) (cdr args)))
-                              (if pdd-debug-buffer
-                                  (with-current-buffer (get-buffer-create pdd-debug-buffer)
-                                    (goto-char (point-max))
-                                    (princ (apply #'format args) (current-buffer))
-                                    (princ "\n" (current-buffer)))
-                                (apply #'message args)))
-             for el in args
-             if (and (stringp el) (string-match-p "%[sSdx]" el))
-             do (progn (if sub (funcall display sub)) (setq sub (list el)))
-             else do (push el sub)
-             finally (funcall display sub))))
+(defmacro pdd-log (tag &rest strings)
+  "Output TAG and STRINGS for debug.
+By default output to *Messages* buffer, if `pdd-log-redirect-function' is
+non-nil then redirect the output to this function instead."
+  (let (message messages)
+    (dolist (arg strings)
+      (if (stringp arg)
+          (progn (if message (push (reverse message) messages))
+                 (setq message (list arg)))
+        (push arg message)))
+    (if message (push (reverse message) messages))
+    (setq messages (reverse messages))
+    `(when (and pdd-debug
+                (or (eq ,tag pdd-debug) (and (eq pdd-debug t) (not (eq ,tag 'task)))))
+       (if pdd-log-redirect-function
+           (progn ,@(cl-loop for message in messages
+                             collect `(funcall pdd-log-redirect-function ,tag (format ,@message))))
+         ,@(cl-loop for message in messages
+                    collect `(message ,(concat "[%s] " (car message))
+                                      ,(or tag "pdd") ,@(cdr message)))))))
 
 (defconst pdd-common-cache (make-hash-table :test 'equal))
 
@@ -551,6 +548,8 @@ reorder the built-in transformers unless you fully understand the consequences."
 (eval-when-compile
   (defvar pdd--dynamic-context-vars
     '(default-directory
+      pdd-debug
+      pdd-log-redirect-function
       pdd-base-url
       pdd-default-sync
       pdd-user-agent
@@ -916,18 +915,18 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
   (maphash (lambda (k _) (cancel-timer k)) pdd-task--timer-pool)
   (clrhash pdd-task--timer-pool))
 
-(defun pdd--wrap-task-handlers (task done fail fine &rest fine-args)
-  "Wrap TASK with DONE/FAIL handlers and with FINE and FINE-ARGS for cleanup."
+(defun pdd--wrap-task-handlers (task done fail fine &optional fine-arg)
+  "Wrap TASK with DONE/FAIL handlers and with FINE/FINE-ARG for cleanup."
   (pdd-then task
     (if (and done (not (functionp done)))
         (lambda ()
           (unwind-protect done
-            (ignore-errors (pdd-funcall fine fine-args))))
+            (if fine (pdd-funcall fine (list fine-arg)))))
       (let ((args (pdd-function-arguments (or done #'identity))))
-        `(lambda (,@args)
+        `(lambda ,args
            (unwind-protect
                (,(or done #'identity) ,@args)
-             (ignore-errors (pdd-funcall ,fine ,fine-args))))))
+             (if ,fine (pdd-funcall ,fine (list ,fine-arg)))))))
     (lambda (reason &optional context)
       (unwind-protect
           (if fail
@@ -935,7 +934,7 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
             (if (consp reason)
                 (signal (car reason) (cdr reason))
               (user-error "%s" reason)))
-        (ignore-errors (pdd-funcall fine fine-args))))))
+        (if fine (pdd-funcall fine (list fine-arg)))))))
 
 (defun pdd-delay-task (time &optional value)
   "Create a promise that resolve VALUE after a specified TIME delay.
@@ -1212,7 +1211,7 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
                                            (pdd-resolve task res exit-status))))))
                                  (when (buffer-live-p (current-buffer))
                                    (kill-buffer (current-buffer)))
-                                 (ignore-errors (pdd-funcall fine (list proc))))))))
+                                 (if fine (pdd-funcall fine (list proc))))))))
          :signal signal-fn
          (condition-case err
              (progn
@@ -1733,8 +1732,7 @@ to be called when task is acquired."
   (with-slots (url retry fail fine abort-flag task queue backend) request
     (setf fail
           (let ((fail1 fail)
-                (fail-default pdd-default-error-handler)
-                (context (pdd--capture-dynamic-context)))
+                (fail-default pdd-default-error-handler))
             (lambda (err)
               (unless (memq abort-flag '(cancel abort))
                 (pdd-log 'fail "%s | %s" err (or fail1 'None))
@@ -1748,6 +1746,11 @@ to be called when task is acquired."
                       (cl-decf retry)
                       (pdd backend request))
                   ;; really fail
+                  (pdd-log 'fail "%s"
+                           (with-temp-buffer
+                             (let ((standard-output (current-buffer)))
+                               (backtrace)
+                               (buffer-string))))
                   (unwind-protect
                       (condition-case err1
                           (cond ; error -> :fail -> task chain -> on-rejected | default handler
@@ -1755,16 +1758,16 @@ to be called when task is acquired."
                             (when fail1
                               (pdd-log 'fail "calling user :fail callback")
                               (aset task 7 t) ; set inhibit-default-rejection-p flag
-                              (ignore-errors
-                                (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
-                                                         :error err :request request))))
-                            (pdd-log 'fail "reject error to task")
+                              (condition-case err2
+                                  (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err))))
+                                (error (setq err err2))))
+                            (pdd-log 'fail "reject error to task: %s" err)
                             (pdd-log 'task "TASK FAIL:  %s" url)
-                            (pdd-reject task err context))
+                            (pdd-reject task err (pdd--capture-dynamic-context))
+                            task)
                            (fail1
                             (pdd-log 'fail "display error with: fail callback.")
-                            (pdd-funcall fail1 (list :message (cadr err) :code (car-safe (cddr err))
-                                                     :error err :request request)))
+                            (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
                            (fail-default
                             (pdd-log 'fail "display error with: default error handler")
                             (pdd-funcall fail-default (list err request))))
@@ -1926,7 +1929,7 @@ Make sure this is after data and headers being processed."
                          (pdd-reject t1 'cancel))))))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)
-             do (pdd-log 'req (symbol-name transformer))
+             do (pdd-log 'req "%s" (symbol-name transformer))
              do (funcall transformer request))))
 
 (cl-defgeneric pdd-make-request (backend &rest _arg)
@@ -2018,7 +2021,7 @@ Make sure this is after data and headers being processed."
   (if (oref request abort-flag)
       (pdd-log 'resp "skip response (aborted).")
     (cl-loop for transformer in (pdd-response-transformers (oref request backend))
-             do (pdd-log 'resp (symbol-name transformer))
+             do (pdd-log 'resp "%s" (symbol-name transformer))
              do (funcall transformer request))
     (list :body pdd-resp-body :headers pdd-resp-headers
           :code pdd-resp-status :version pdd-resp-version :request request)))
@@ -2078,7 +2081,7 @@ Keyword Arguments:
   :DONE    - Success callback, signature:
              (&key body headers code version request)
   :FAIL    - Failure callback, signature:
-             (&key text code error request)
+             (&key error request text code)
   :FINE    - Final callback (always called), signature:
              (&optional request)
   :SYNC    - Whether to execute synchronously (boolean)
@@ -2276,14 +2279,15 @@ ARGS should a request instances or keywords to build the request."
                (url-user-agent (alist-get "user-agent" headers nil nil #'pdd-string-iequal))
                (url-request-extra-headers (assoc-delete-all "user-agent" headers #'pdd-string-iequal))
                (url-mime-encoding-string "identity")
+               (context (pdd--capture-dynamic-context))
                buffer-data data-buffer
                (callback (lambda (status)
                            (unwind-protect
-                               (progn
-                                 (pdd-log 'url-backend "callback.")
+                               (pdd--with-restored-dynamic-context context
                                  (ignore-errors (cancel-timer pdd-url-timeout-timer))
                                  (setq data-buffer (current-buffer))
                                  (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
+                                 (pdd-log 'url-backend "URL-CALLBACK! flag: %s, timer: %s" abort-flag pdd-url-timeout-timer)
                                  (if abort-flag
                                      (pdd-log 'url-backend "skip done (aborted or timeout).")
                                    (condition-case err1
@@ -2411,6 +2415,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
            (proxy (pdd-proxy-vars backend request))
            (plz-curl-default-args
             (if proxy (append proxy plz-curl-default-args) plz-curl-default-args))
+           (context (pdd--capture-dynamic-context))
            (filter-fn
             (when filter
               (lambda (proc string)
@@ -2422,10 +2427,12 @@ Or switch http backend to `pdd-url-backend' instead:\n
                       (save-restriction
                         ;; it's better to provide a narrowed buffer to :filter
                         (narrow-to-region (point) (point-max))
-                        (funcall filter))))))))
+                        (pdd--with-restored-dynamic-context context
+                          (funcall filter)))))))))
            (results (lambda ()
-                      (pdd-log tag "before resp")
-                      (pdd-transform-response request))))
+                      (pdd--with-restored-dynamic-context context
+                        (pdd-log tag "before resp")
+                        (pdd-transform-response request)))))
       ;; log
       (pdd-log tag
         "%s"          url
@@ -2461,13 +2468,15 @@ Or switch http backend to `pdd-url-backend' instead:\n
           :as results
           :filter filter-fn
           :then (lambda (res)
-                  (if abort-flag
-                      (pdd-log tag "skip done (aborted).")
-                    (pdd-log tag "before done")
-                    (pdd-funcall done res)))
+                  (pdd--with-restored-dynamic-context context
+                    (if abort-flag
+                        (pdd-log tag "skip done (aborted).")
+                      (pdd-log tag "before done")
+                      (pdd-funcall done res))))
           :else (lambda (err)
-                  (pdd-log tag "before fail")
-                  (funcall fail (pdd-transform-error backend request err)))
+                  (pdd--with-restored-dynamic-context context
+                    (pdd-log tag "before fail")
+                    (funcall fail (pdd-transform-error backend request err))))
           :connect-timeout timeout)))))
 
 

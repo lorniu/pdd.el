@@ -301,23 +301,23 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
   (let ((retry-count 0) finished)
     (should (pdd "/delay/2"
               :timeout 1 :retry 0
-              :fail (lambda (r c) (setq it (format "%s%s" r c))))
+              :fail (lambda (err) (setq it (format "%s" err))))
             (string-match-p "408\\|timeout" it))
     (should (pdd "/delay/3"
               :init (lambda () (cl-incf retry-count))
               :timeout 2 :retry 2
-              :fail (lambda (r c) (setq it (cons r c)))
+              :fail (lambda (&key text code) (setq it (cons text code)))
               :fine (lambda () (setq finished t)))
             (while (not finished) (sleep-for 0.2))
             (and (string-match-p "timeout\\|408" (format "%s" it))
                  (= retry-count 3)))))
 
 (pdd-deftests http-error-404 ()
-  (should (pdd "/status/404" :fail (lambda (e c) (setq it (cons e c))))
+  (should (pdd "/status/404" :fail (lambda (&key text code) (setq it (cons text code))))
           (equal it (cons "Not found" 404))))
 
 (pdd-deftests http-error-500 ()
-  (should (pdd "/status/500" :fail (lambda (e c) (setq it (cons e c))))
+  (should (pdd "/status/500" :fail (lambda (&key text code) (setq it (cons text code))))
           (equal it (cons "Internal server error" 500))))
 
 ;; There is a wrong return response header bug in plz

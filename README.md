@@ -171,12 +171,11 @@ DONE and other callbacks have variadic arguments, use according their signatures
 (pdd "https://httpbin.org/ip" :filter (lambda (headers) (message "%s" headers)))
 (pdd "https://httpbin.org/ip" :filter (lambda (&key request) (message "%s" request)))
 
-;; FAIL: (&key text code error request)
+;; FAIL: (&key error request text code)
 
-(pdd "https://httpbin.org/ip7" :fail (lambda ()       (message "pity.")))
-(pdd "https://httpbin.org/ip7" :fail (lambda (text)   (message "%s" text)))
-(pdd "https://httpbin.org/ip7" :fail (lambda (_ code) (message "%s" code)))
-(pdd "https://httpbin.org/ip7" :fail (lambda (&key error) (message "%s" error)))
+(pdd "https://httpbin.org/ip7" :fail (lambda () (message "pity.")))
+(pdd "https://httpbin.org/ip7" :fail (lambda (err) (message "%s" err)))
+(pdd "https://httpbin.org/ip7" :fail (lambda (&key text code) (message "%s" code)))
 
 ;; FINE: (&optional request)
 
@@ -412,7 +411,7 @@ Keyword Arguments:
   :DONE    - Success callback, signature:
              (&key body headers code version request)
   :FAIL    - Failure callback, signature:
-             (&key text code error request)
+             (&key error request text code)
   :FINE    - Final callback (always called), signature:
              (&optional request)
   :SYNC    - Whether to execute synchronously (boolean)
