@@ -600,11 +600,9 @@ reorder the built-in transformers unless you fully understand the consequences."
 
 (defclass pdd-http-backend (pdd-backend)
   ((user-agent :initarg :user-agent
-               :initform nil
                :type (or string null))
    (proxy :initarg :proxy
-          :type (or string function null)
-          :initform nil))
+          :type (or string function null)))
   "Used to send http request."
   :abstract t)
 
@@ -1663,31 +1661,31 @@ to be called when task is acquired."
 
 (defclass pdd-request ()
   ((url        :initarg :url         :type string)
-   (method     :initarg :method      :type (or symbol string) :initform nil)
-   (params     :initarg :params      :type (or string list)   :initform nil)
-   (headers    :initarg :headers     :type list               :initform nil)
-   (data       :initarg :data        :type (or function string list) :initform nil)
+   (method     :initarg :method      :type (or symbol string))
+   (params     :initarg :params      :type (or string list))
+   (headers    :initarg :headers     :type list)
+   (data       :initarg :data        :type (or function string list))
    (datas      :initform nil         :type (or string null))
    (binaryp    :initform nil         :type boolean)
    (init       :initarg :init        :type (or function null) :initform nil)
-   (filter     :initarg :filter      :type (or function null) :initform nil)
+   (filter     :initarg :filter      :type (or function null))
    (as         :initarg :as          :type (or function symbol null) :initform nil)
-   (done       :initarg :done        :type (or function null) :initform nil)
-   (fail       :initarg :fail        :type (or function null) :initform nil)
+   (done       :initarg :done        :type (or function null))
+   (fail       :initarg :fail        :type (or function null))
    (fine       :initarg :fine        :type (or function null) :initform nil)
    (sync       :initarg :sync)
-   (timeout    :initarg :timeout     :type (or number null)   :initform nil)
-   (retry      :initarg :retry       :type (or number null)   :initform nil)
-   (proxy      :initarg :proxy       :type (or string list null) :initform nil)
-   (queue      :initarg :queue       :type (or pdd-queue null) :initform nil)
-   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null) :initform nil)
+   (timeout    :initarg :timeout     :type (or number null))
+   (retry      :initarg :retry       :type (or number null))
+   (proxy      :initarg :proxy       :type (or string list null))
+   (queue      :initarg :queue       :type (or pdd-queue null))
+   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null))
    (buffer     :initarg :buffer      :initform nil)
    (process    :initarg :process     :initform nil)
    (task       :initarg :task        :initform nil)
    (backend    :initarg :backend     :type (or pdd-http-backend null))
    (abort-flag :initarg :abort-flag  :initform nil)
    (begtime    :type (or null float))
-   (verbose    :initarg :verbose     :type (or function boolean) :initform nil))
+   (verbose    :initarg :verbose     :type (or function boolean)))
   "Abstract base class for HTTP request configs.")
 
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
@@ -1747,7 +1745,7 @@ to be called when task is acquired."
   "Construct the :fail callback handler for REQUEST."
   (with-slots (url retry fail fine abort-flag task queue backend) request
     (setf fail
-          (let ((fail1 fail)
+          (let ((fail1 (if (slot-boundp request 'fail) fail 'unset))
                 (fail-default pdd-default-error-handler))
             (lambda (err)
               (unless (memq abort-flag '(cancel abort))
@@ -1771,19 +1769,21 @@ to be called when task is acquired."
                       (condition-case err1
                           (cond ; error -> :fail -> task chain -> on-rejected | default handler
                            ((pdd-task-p task)
-                            (when fail1
-                              (pdd-log 'fail "calling user :fail callback")
+                            (when (not (eq fail1 'unset))
                               (aset task 7 t) ; set inhibit-default-rejection-p flag
                               (condition-case err2
-                                  (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err))))
+                                  (when fail1
+                                    (pdd-log 'fail "calling user :fail callback")
+                                    (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
                                 (error (setq err err2))))
                             (pdd-log 'fail "reject error to task: %s" err)
                             (pdd-log 'task "TASK FAIL:  %s" url)
                             (pdd-reject task err (pdd--capture-dynamic-context))
                             task)
-                           (fail1
-                            (pdd-log 'fail "display error with: fail callback.")
-                            (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
+                           ((not (eq fail1 'unset))
+                            (when fail1
+                              (pdd-log 'fail "display error with: fail callback.")
+                              (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err))))))
                            (fail-default
                             (pdd-log 'fail "display error with: default error handler")
                             (pdd-funcall fail-default (list err request))))
@@ -1821,7 +1821,7 @@ to be called when task is acquired."
 (cl-defmethod pdd-transform-req-cookies ((request pdd-request))
   "Add cookies from cookie jar to REQUEST headers."
   (with-slots (headers url cookie-jar) request
-    (let ((jar (or cookie-jar pdd-default-cookie-jar)))
+    (let ((jar (if (slot-boundp request 'cookie-jar) cookie-jar pdd-default-cookie-jar)))
       (when (functionp jar)
         (setq jar (pdd-funcall jar (list request))))
       (when (setf cookie-jar jar)
@@ -1865,14 +1865,19 @@ to be called when task is acquired."
 (cl-defmethod pdd-transform-req-proxy ((request pdd-request))
   "Parse proxy setting for current REQUEST."
   (let* ((backend (oref request backend))
-         (proxy (or (oref request proxy) (oref backend proxy) pdd-default-proxy)))
+         (proxy (cond ((slot-boundp request 'proxy)
+                       (oref request proxy))
+                      ((slot-boundp backend 'proxy)
+                       (oref backend proxy))
+                      (t pdd-default-proxy))))
     (when (functionp proxy)
       (setq proxy (pdd-funcall proxy (list request))))
     (when (stringp proxy)
       (condition-case nil
           (setq proxy (pdd-parse-proxy-url proxy))
         (error (user-error "Make sure proxy url is correct: %s" proxy))))
-    (when proxy
+    (if (null proxy)
+        (oset request proxy nil)
       (unless (and (plist-get proxy :type) (plist-get proxy :host) (plist-get proxy :port))
         (user-error "Invalid proxy found"))
       (when (and (plist-get proxy :user)
@@ -1893,7 +1898,7 @@ to be called when task is acquired."
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'pdd-string-iequal)
-      (push `("User-Agent" . ,(or (oref backend user-agent) pdd-user-agent)) headers))
+      (push `("User-Agent" . ,(if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-user-agent)) headers))
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
 
@@ -1914,25 +1919,33 @@ Make sure this is after data and headers being processed."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data timeout retry sync init done filter abort-flag buffer backend task queue verbose) request
+  (with-slots (url method params headers data timeout retry sync done filter abort-flag buffer backend task queue verbose) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
-    (when params
+    (when (and (slot-boundp request 'params) params)
       (setf url (pdd-gen-url-with-params url params)))
     ;; make such keywords can be dynamically bound
-    (unless headers (setf headers pdd-default-headers))
-    (unless data (setf data pdd-default-data))
-    (unless done (setf done pdd-default-done))
-    (unless filter (setf filter pdd-default-filter))
-    (unless timeout (setf timeout pdd-default-timeout))
-    (unless retry (setf retry pdd-default-retry))
-    (unless queue (setf queue pdd-default-queue))
-    (unless verbose (setf verbose pdd-default-verbose))
-    ;; init other slots
+    (unless (slot-boundp request 'headers)
+      (setf headers pdd-default-headers))
+    (unless (slot-boundp request 'data)
+      (setf data pdd-default-data))
+    (unless (slot-boundp request 'done)
+      (setf done pdd-default-done))
+    (unless (slot-boundp request 'filter)
+      (setf filter pdd-default-filter))
+    (unless (slot-boundp request 'timeout)
+      (setf timeout pdd-default-timeout))
+    (unless (slot-boundp request 'retry)
+      (setf retry pdd-default-retry))
+    (unless (slot-boundp request 'queue)
+      (setf queue pdd-default-queue))
+    (unless (slot-boundp request 'verbose)
+      (setf verbose pdd-default-verbose))
     (unless (slot-boundp request 'sync)
       (setf sync (if (eq pdd-default-sync 'unset)
                      (if done nil t) pdd-default-sync)))
-    (unless method (setf method (if data 'post 'get)))
+    (unless (and (slot-boundp request 'method) method)
+      (setf method (if data 'post 'get)))
     (unless buffer (setf buffer (current-buffer)))
     (unless sync
       ;; create task for asynchronous request
