@@ -18,7 +18,7 @@ Case just for demo:
 (pdd-chain
     ;; git log of the repository, parse to list
     (let ((default-directory "~/source/emacs/"))
-      (pdd-process-task '(git log --pretty=oneline) :as 'line))
+      (pdd-process '(git log --pretty=oneline) :as 'line))
 
   ;; format and filter
   (lambda (r) (mapcar (lambda (x) (cons (substring x 0 40) (substring x 40))) r))
@@ -29,16 +29,16 @@ Case just for demo:
   (lambda (r) (pdd "https://httpbin.org/anything" :data r))
 
   ;; maybe some other tasks, take delay for example
-  (lambda (r) (pdd-delay-task 3 r))
+  (lambda (r) (pdd-delay 3 r))
 
   ;; maybe some other tasks, take another request for example
   (lambda (r) (pdd "https://httpbin.org/anything" :data (format "%s" r)))
 
   ;; write to file using command. t says: wrap the command with shell
-  (lambda (r) (pdd-process-task t `(tee "~/aaa.xxx") :init r))
+  (lambda (r) (pdd-process t `(tee "~/aaa.xxx") :init r))
 
   ;; display file content using shell command
-  (lambda (r) (pdd-process-task t `(cat "~/aaa.xxx") :done #'print))
+  (lambda (r) (pdd-process t `(cat "~/aaa.xxx") :done #'print))
 
   ;; capture potential exceptions
   :fail (lambda (r) (message "EEE: %s" r)))
@@ -48,16 +48,16 @@ Or with async/await:
 ```emacs-lisp
 (pdd-async
   (let* ((default-directory "~/source/emacs/")
-         (logs (await (pdd-process-task '(git log --pretty=oneline) :as 'line)))
+         (logs (await (pdd-process '(git log --pretty=oneline) :as 'line)))
          (rpcs (cl-remove-if-not
                 (lambda (x) (string-match-p "jsonrpc"  (cdr x)))
                 (mapcar (lambda (x) (cons (substring x 0 40) (substring x 40))) logs)))
          (data (cl-subseq rpcs 0 (min (length rpcs) 10)))
          (r1 (await (pdd "https://httpbin.org/anything" :data data)))
-         (_  (await (pdd-delay-task 3)))                     ; wait
+         (_  (await (pdd-delay 3)))                     ; wait
          (r2 (await (pdd "https://httpbin.org/anything" :data (format "%s" r1)))))
-    (await (pdd-process-task t `(tee "~/aaa.xxx") :init r2)) ; write
-    (pdd-process-task t `(cat "~/aaa.xxx") :done #'print)))  ; read
+    (await (pdd-process t `(tee "~/aaa.xxx") :init r2)) ; write
+    (pdd-process t `(cat "~/aaa.xxx") :done #'print)))  ; read
 ```
 
 ## Example 2. inspect http headers using curl
@@ -65,7 +65,7 @@ Or with async/await:
 Popup a buffer to show the request and response details quickly. This is useful sometimes:
 
 ```emacs-lisp
-(pdd-process-task '(curl "https://httpbin.org/uuid" -v)
+(pdd-process '(curl "https://httpbin.org/uuid" -v)
   :done (lambda (r)
           (with-current-buffer (get-buffer-create "*curl-result*")
             (let ((inhibit-read-only t))
@@ -83,7 +83,7 @@ Or with async/await:
 ```emacs-lisp
 (pdd-async
   (let* ((url "https://httpbin.org/uuid")
-         (res (await (pdd-process-task `(curl ,url -v)))))
+         (res (await (pdd-process `(curl ,url -v)))))
     (with-current-buffer (get-buffer-create "*curl-result*")
       (let ((inhibit-read-only t))
         (erase-buffer)

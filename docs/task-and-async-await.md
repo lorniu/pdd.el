@@ -35,7 +35,7 @@ As you can see, the core functions are `pdd-task`, `pdd-resolve`, `pdd-reject` a
 *  `pdd-signal`: Sends a signal to a task, usually used to cancel a task as `(pdd-signal task 'cancel)`.
 *  `pdd-chain`: A convenience function built on `pdd-then` for simplifying sequential task chains.
 *  `pdd-all`, `pdd-any`, `pdd-race`: Manage multiple concurrent tasks.
-*  `pdd-delay-task`, `pdd-timeout-task`, `pdd-interval-task`: Utilities integrating Emacs timers with tasks.
+*  `pdd-delay`, `pdd-timeout`, `pdd-interval`: Utilities integrating Emacs timers with tasks.
 *  `pdd-async/await*`: Provides syntax sugar for a more synchronous-looking style when working with tasks, just like what ts/c# done.
 
 Explain with some codes:
@@ -120,9 +120,9 @@ This task is implemented with three different ways, all are asynchronous and wil
 
 ```emacs-lisp
 (let* ((pdd-default-sync nil)
-       (t1 (pdd-delay-task 3 "https://httpbin.org/ip"))
+       (t1 (pdd-delay 3 "https://httpbin.org/ip"))
        (t2 (pdd-then t1 (lambda (r) (pdd r))))
-       (t3 (pdd-then t2 (lambda (r) (pdd-delay-task 2 "https://httpbin.org/anything"))))
+       (t3 (pdd-then t2 (lambda (r) (pdd-delay 2 "https://httpbin.org/anything"))))
        (t4 (pdd-then t3 (lambda (r) (pdd r :data `((hello . ,(alist-get 'origin (car (aref t2 2))))))))))
   (pdd-then t4
     (lambda (res) (message "> %s" (alist-get 'form res)))
@@ -132,9 +132,9 @@ This task is implemented with three different ways, all are asynchronous and wil
 With the help of auxiliary function `pdd-chain`:
 ```emacs-lisp
 (let (r2)
-  (pdd-chain (pdd-delay-task 3 "https://httpbin.org/ip")
+  (pdd-chain (pdd-delay 3 "https://httpbin.org/ip")
     (lambda (r) (pdd r))
-    (lambda (r) (setq r2 r) (pdd-delay-task 2 "https://httpbin.org/anything"))
+    (lambda (r) (setq r2 r) (pdd-delay 2 "https://httpbin.org/anything"))
     (lambda (r) (pdd r :data `((hello . ,(cdar r2)))))
     (lambda (r) (message "> %s" (alist-get 'form r)))
     :fail
@@ -145,9 +145,9 @@ With the help of auxiliary function `pdd-chain`:
 
 ```emacs-lisp
 (pdd-async
-  (let* ((url1 (await (pdd-delay-task 3 "https://httpbin.org/ip")))
+  (let* ((url1 (await (pdd-delay 3 "https://httpbin.org/ip")))
          (res1 (await (pdd url1)))
-         (url2 (await (pdd-delay-task 2 "https://httpbin.org/anything"))))
+         (url2 (await (pdd-delay 2 "https://httpbin.org/anything"))))
     (pdd url2
       :data `((hello . ,(alist-get 'origin res1)))
       :done (lambda (res) (message "> %s" (alist-get 'form res)))
@@ -213,7 +213,7 @@ Write code to accomplish this without block Emacs:
 ```emacs-lisp
 (let* ((t1 (pdd "https://httpbin.org/ip" :done (lambda (r) (alist-get 'origin r))))
        (t2 (pdd "https://httpbin.org/uuid" :done (lambda (r) (alist-get 'uuid r))))
-       (t3 (pdd-delay-task 2 "timeout")))
+       (t3 (pdd-delay 2 "timeout")))
   (pdd-then (pdd-any t1 t2 t3)
     (lambda (r) (message "> %s" r))))
 ```
@@ -224,7 +224,7 @@ Write code to accomplish this without block Emacs:
 (pdd-async
   (let* ((t1 (pdd "https://httpbin.org/ip" :done (lambda (r) (alist-get 'origin r))))
          (t2 (pdd "https://httpbin.org/uuid" :done (lambda (r) (alist-get 'uuid r))))
-         (t3 (pdd-delay-task 2 "timeout")))
+         (t3 (pdd-delay 2 "timeout")))
     (message "> %s" (await (pdd-any t1 t2 t3)))))
 ```
 
@@ -278,7 +278,7 @@ Fetch data from github. With `pdd-all` to retrieve data from several requests at
   (let* ((r1 (pdd "https://httpbin.org/ip"))
          (r2 (pdd "https://httpbin.org/user-agent"))
          (r3 (await r1 r2))
-         (r4 (await (pdd-delay-task 2 "https://httpbin.org/uuid")))
+         (r4 (await (pdd-delay 2 "https://httpbin.org/uuid")))
          (r5 (cons 1 (await (pdd r4))))
          (r6 (pdd "https://httpbin.org/user-agent")))
     (message "> %s %s %s" r3 r5 (await r6))))
