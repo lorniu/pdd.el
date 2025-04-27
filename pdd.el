@@ -89,7 +89,7 @@
 (require 'ansi-color)
 
 (defgroup pdd nil
-  "HTTP Library Adapter."
+  "HTTP Library and Async Toolkit."
   :group 'network
   :prefix 'pdd-)
 
@@ -1398,6 +1398,12 @@ This is implemented with macro expand to `pdd-then' callback."
                        (t (pdd-reject reason-data)))
                     (error (pdd-reject err)))))))))
     `(let ((pdd-default-sync nil)) ,(transform-body body))))
+
+(defmacro pdd-let* (&rest body)
+  "A useful wrapper for `pdd-async' and `let*'.
+Like `pdd-async' but wrap BODY in `let*' form."
+  (declare (indent 1))
+  `(pdd-async (let* ,@body)))
 
 ;; Cookie
 

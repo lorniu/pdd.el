@@ -154,6 +154,17 @@ With the help of auxiliary function `pdd-chain`:
       :fail (lambda (err) (message "> something wrong: %s" err)))))
 ```
 
+or using `pdd-let*` sugar:
+```emacs-lisp
+(pdd-let* ((url1 (await (pdd-delay 3 "https://httpbin.org/ip")))
+           (res1 (await (pdd url1)))
+           (url2 (await (pdd-delay 2 "https://httpbin.org/anything"))))
+  (pdd url2
+    :data `((hello . ,(alist-get 'origin res1)))
+    :done (lambda (res) (message "> %s" (alist-get 'form res)))
+    :fail (lambda (err) (message "> something wrong: %s" err))))
+```
+
 ## Example 2. Wrap url-retrieve with Promise
 
 First, wrap `url-retrieve` that make it return a `pdd-task` instance:
@@ -274,14 +285,13 @@ Fetch data from github. With `pdd-all` to retrieve data from several requests at
 ## Example 5. the more complex the logic, the more concise the code appears
 
 ```emacs-lisp
-(pdd-async
-  (let* ((r1 (pdd "https://httpbin.org/ip"))
-         (r2 (pdd "https://httpbin.org/user-agent"))
-         (r3 (await r1 r2))
-         (r4 (await (pdd-delay 2 "https://httpbin.org/uuid")))
-         (r5 (cons 1 (await (pdd r4))))
-         (r6 (pdd "https://httpbin.org/user-agent")))
-    (message "> %s %s %s" r3 r5 (await r6))))
+(pdd-let* ((r1 (pdd "https://httpbin.org/ip"))
+           (r2 (pdd "https://httpbin.org/user-agent"))
+           (r3 (await r1 r2))
+           (r4 (await (pdd-delay 2 "https://httpbin.org/uuid")))
+           (r5 (cons 1 (await (pdd r4))))
+           (r6 (pdd "https://httpbin.org/user-agent")))
+  (message "> %s %s %s" r3 r5 (await r6)))
 ```
 
 ## More you also should know

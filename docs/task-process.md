@@ -79,21 +79,19 @@ Popup a buffer to show the request and response details quickly. This is useful 
               (display-buffer (current-buffer))))))
 ```
 
-Or with async/await:
+Or with async/await syntax:
 ```emacs-lisp
-(pdd-async
-  (let* ((url "https://httpbin.org/uuid")
-         (res (await (pdd-process `(curl ,url -v)))))
-    (with-current-buffer (get-buffer-create "*curl-result*")
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (save-excursion (insert res))
-        (special-mode) ; readonly, and using q to quit
-        (font-lock-add-keywords ; pretty display
-         nil '(("^\\* .*"  . 'font-lock-comment-face)
-               ("^[<>] .*" . 'font-lock-string-face)))
-        (font-lock-flush)
-        (display-buffer (current-buffer))))))
+(pdd-let* ((res (pdd-process `(curl "https://httpbin.org/uuid" -v))))
+  (with-current-buffer (get-buffer-create "*curl-result*")
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (save-excursion (insert (await res)))
+      (special-mode) ; readonly, and using q to quit
+      (font-lock-add-keywords ; pretty display
+       nil '(("^\\* .*"  . 'font-lock-comment-face)
+             ("^[<>] .*" . 'font-lock-string-face)))
+      (font-lock-flush)
+      (display-buffer (current-buffer)))))
 ```
 
 Something like this will be displayed:
@@ -116,4 +114,20 @@ Something like this will be displayed:
   "uuid": "b9e3c2ee-55c0-4809-8976-2da6c2f2710a"
 }
 * Connection #0 to host httpbin.org left intact
+```
+
+## Example 3. a command to kill system process in Emacs
+
+```emacs-lisp
+(defun my-kill-system-process ()
+  (interactive)
+  (pdd-let* ((lines (pdd-process '(ps aux) :as 'line))
+             (line (completing-read "Process to kill: " (cdr (await lines)) nil t))
+             (strs (split-string line))
+             (proc-id (cadr strs))
+             (proc-name (car (last strs))))
+    (when (y-or-n-p (format "Kill process: %s ?" proc-name))
+      (pdd-process `(kill -9 ,proc-id)
+        :done (lambda (_) (message "DONE."))
+        :fail (lambda (r) (message "[Fail] %s" r))))))
 ```
