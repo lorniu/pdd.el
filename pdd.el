@@ -440,6 +440,7 @@ function return such a url string proxy."
     (json-u8     . ("Content-Type"  . "application/json; charset=utf-8"))
     (www-url     . ("Content-Type"  . "application/x-www-form-urlencoded"))
     (www-url-u8  . ("Content-Type"  . "application/x-www-form-urlencoded; charset=utf-8"))
+    (acc-json    . ("Accept"        . "application/json"))
     (acc-github  . ("Accept"        . "application/vnd.github+json"))
     (basic       . ("Authorization" . "Basic %s"))
     (bear        . ("Authorization" . "Bearer %s"))
