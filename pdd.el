@@ -1905,14 +1905,14 @@ to be called when task is acquired."
 (cl-defmethod pdd-transform-req-verbose ((request pdd-request))
   "Request output in verbose mode for REQUEST.
 Make sure this is after data and headers being processed."
-  (with-slots (url datas verbose headers buffer) request
+  (with-slots (url method datas verbose headers buffer) request
     (when verbose
       (let* ((hs (mapconcat (lambda (header)
                               (format "> %s: %s" (car header) (cdr header)))
                             headers "\n"))
              (ds (when (> (length datas) 0)
                    (concat "* " (car (pdd-split-string-by datas "\n")) "\n")))
-             (str (concat "\n* " url "\n" hs "\n" ds)))
+             (str (concat "\n* " (upcase (format "%s " method)) url "\n" hs "\n" ds)))
         (with-current-buffer buffer
           (funcall (if (functionp verbose) verbose #'princ) str))))))
 
@@ -1987,12 +1987,13 @@ Make sure this is after data and headers being processed."
 
 (cl-defmethod pdd-transform-resp-verbose (request)
   "Response output in verbose mode for REQUEST."
-  (with-slots (verbose buffer) request
+  (with-slots (verbose buffer begtime) request
     (when verbose
       (let* ((raw-headers (buffer-substring (point-min) (max 1 (- pdd-resp-mark 2))))
-             (hs (replace-regexp-in-string "^" "< " raw-headers)))
+             (hs (replace-regexp-in-string "^" "< " raw-headers))
+             (elapsed (format "* THIS REQUEST COST %.2f SECONDS." (float-time (time-since begtime)))))
         (with-current-buffer buffer
-          (funcall (if (functionp verbose) verbose #'princ) hs))))))
+          (funcall (if (functionp verbose) verbose #'princ) (concat hs "\n" elapsed)))))))
 
 (cl-defmethod pdd-transform-resp-headers (_request)
   "Extract status line and headers."
