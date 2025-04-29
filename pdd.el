@@ -1871,7 +1871,7 @@ to be called when task is acquired."
                        (oref backend proxy))
                       (t pdd-default-proxy))))
     (when (functionp proxy)
-      (setq proxy (pdd-funcall proxy (list request))))
+      (setq proxy (pdd-funcall proxy (list request backend))))
     (when (stringp proxy)
       (condition-case nil
           (setq proxy (pdd-parse-proxy-url proxy))

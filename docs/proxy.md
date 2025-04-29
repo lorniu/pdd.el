@@ -29,7 +29,7 @@ Configure proxies support different levels:
 (setq pdd-default-proxy "socks5://127.0.0.1:1080")
 ```
 
-To make proxy smarter, use a function instead of the url string:
+To make proxy smarter, use a function instead of the url string, the function signature is (&optional request backend).
 
 ```emacs-lisp
 ;; Just return a url format string as proxy
@@ -65,6 +65,15 @@ If the proxy need authorization, embed the credentials into url:
 ```
 
 ## Advanced Examples
+
+Backend-Specific Proxies:
+```emacs-lisp
+(setq pdd-default-proxy
+      (lambda (_ backend)
+        (if (cl-typep backend 'pdd-url-backend)
+            "https://127.0.0.1:1081"
+          "socks5://127.0.0.1:1080")))
+```
 
 Protocol-Specific Proxies:
 ```emacs-lisp
