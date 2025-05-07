@@ -108,6 +108,9 @@ Failover Proxies (can extend to a proxy pool):
                  return proxy)))
 ```
 
-## Miscellaneous
+## Notice for `pdd-url-backend`
 
-**Notice:** The `pdd-url-backend` automatically applies the same proxy to both HTTP and HTTPS connections by default. To implement protocol-specific proxy routing (e.g., different proxies for HTTP vs HTTPS), you can use a dynamic proxy function as the Protocol-Specific example.
+- Although patches can make _socks proxy over tls_ work, it is usually fragile. Hoping that one day this can be fixed by upstream.
+  * **bug#13833:** https://lists.nongnu.org/archive/html/bug-gnu-emacs/2025-03/msg01757.html
+  * **bug#53941:** https://lists.gnu.org/archive/html/bug-gnu-emacs/2024-09/msg00836.html
+- The `pdd-url-backend` automatically applies the same proxy to both HTTP and HTTPS connections by default. To implement protocol-specific proxy routing (e.g., different proxies for HTTP vs HTTPS), you can use a dynamic proxy function as the Protocol-Specific example.

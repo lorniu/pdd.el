@@ -31,12 +31,16 @@ Once you have a `pdd-task` instance, forget the asynchronous process itself, jus
 *  After register, `pdd-then` returns a *new* `pdd-task`. You can call `pdd-then` again and again on new task, so a **task chain** is created. Values (on success) or errors (on failure) propagate through this chain.
 *  If an `on-fulfilled` callback returns another `pdd-task`, the chain automatically waits for *that* inner task to settle, and its result (or error) is passed down the main chain. This **flattens nested callbacks**. This is the biggest benefit of using tasks.
 
-As you can see, the core functions are `pdd-task`, `pdd-resolve`, `pdd-reject` and `pdd-then`, they almost compose everything. Also there are some auxiliary helpers or utilities, they are necessary for different scenarios:
+As you can see, the core functions are `pdd-task`, `pdd-resolve`, `pdd-reject` and `pdd-then`. Also there are some auxiliary helpers or utilities, they are necessary for different scenarios:
 *  `pdd-signal`: Sends a signal to a task, usually used to cancel a task as `(pdd-signal task 'cancel)`.
 *  `pdd-chain`: A convenience function built on `pdd-then` for simplifying sequential task chains.
 *  `pdd-all`, `pdd-any`, `pdd-race`: Manage multiple concurrent tasks.
 *  `pdd-delay`, `pdd-expire`, `pdd-interval`: Utilities integrating Emacs timers with tasks.
-*  `pdd-async/await*`: Provides syntax sugar for a more synchronous-looking style when working with tasks, just like what ts/c# done.
+
+There is also a *async/await* syntax sugar for more synchronous-looking style just like those in TS/C#:
+*  Wrap code with macro `pdd-async`, and use `await` to _wait for result asynchronously_.
+*  Helper macro `pdd-let*` is a shorthand for `(pdd-async (let* (...)))`, which is too often used.
+*  Some limitations are exist, such as currently does not support `loop await` syntax.
 
 Explain with some codes:
 ```emacs-lisp
@@ -79,6 +83,10 @@ Explain with some codes:
 (let ((long-task (pdd "long-running-request")))
   ;; ... maybe later
   (pdd-signal long-task 'cancel)) ; Send a 'cancel signal
+
+;; async/await
+(pdd-async
+  (print (await (pdd "https://httpbin.org/ip"))))
 ```
 
 Next, I will provide some usage examples. Most of these examples can be run directly, and you can try them yourself.

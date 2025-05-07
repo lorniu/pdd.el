@@ -17,8 +17,8 @@ Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
 - [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Control concurrency with `:queue`](docs/queue.md)
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
-- [Integrate `timers` with task and request](docs/task-timers.md)
-- [Integrate `make-process` with task and request](docs/task-process.md)
+- [Integrate `timers` with task and request `(pdd-expire/delay/interval)`](docs/task-timers.md)
+- [Integrate `make-process` with task and request `(pdd-exec)`](docs/task-process.md)
 - [Compare this package with plz.el](#Comparison)  |  [Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
 
 ## Installation
@@ -27,30 +27,30 @@ Download the `pdd.el` and place it in your `load-path`.
 
 ## Usage
 
-The core of the library is function `pdd`:
+Send request with function `pdd`:
 ``` emacs-lisp
-;; Start a request
-
 (pdd "https://httpbin.org/ip" ...)
-(pdd (pdd-url-backend) "https://httpbin.org/ip" ...) ; explicit backend
 
-;; If no http backend specified, then `pdd-default-backend' will be used
+;; Change backend through `pdd-default-backend':
 
-(setq pdd-default-backend (pdd-url-backend))
-(setq pdd-default-backend (pdd-url-backend :proxy "https://localhost:1088"))
-(setq pdd-default-backend (pdd-curl-backend :proxy "socks5://127.0.0.1:1080"))
+(setq pdd-default-backend (pdd-url-backend)) ; default, url.el as backend
+(setq pdd-default-backend (pdd-curl-backend)) ; use plz.el based backend
+(setq pdd-default-backend (pdd-url-backend :proxy "socks5://localhost:1085")) ; more options
 
-;; Dynamically determine backend with a function (&optional url method):
+;; Dynamical backend with a function (&optional url method):
 
 (setq pdd-default-backend
-      (lambda (url method)
-        (cond ((string-match-p "/image/" url)
-               (pdd-curl-backend :proxy "socks5://127.0.0.1:1080"))
-              ((eq method 'patch) (pdd-url-backend))
-              (t (pdd-curl-backend)))))
+      (lambda (url _method)
+        (if (string-match-p "/image/" url)
+            (pdd-curl-backend)
+          (pdd-url-backend))))
+
+;; The backend can be specified explicitly:
+
+(pdd (pdd-url-backend) "https://httpbin.org/ip" ...)
 ```
 
-And try to send requests like this:
+More options of the `pdd` function:
 ``` emacs-lisp
 ;; By default, sync, get
 
