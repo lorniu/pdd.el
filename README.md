@@ -17,8 +17,8 @@ Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
 - [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Control concurrency with `:queue`](docs/queue.md)
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
-- [Integrate `timers` with task and request](docs/task-timers.md)
-- [Integrate `make-process` with task and request](docs/task-process.md)
+- [Integrate `timers` with task and request `(pdd-expire/delay/interval)`](docs/task-timers.md)
+- [Integrate `make-process` with task and request `(pdd-exec)`](docs/task-process.md)
 - [Compare this package with plz.el](#Comparison)  |  [Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
 
 ## Installation

@@ -5,7 +5,75 @@ Interesting utility, interesting try. Non-block and easy.
 Current issue:
 > Some processes may wait for stdin and hang without exit. However, Emacs cannot determine which one will behave like this. This sometimes leads to not getting the results back, you need to kill the process manually. I don't know if there is a way to solve this. So, be especially careful to pay attention to processes that need to read standard input.
 
-## Example 1. process play with other tasks
+## Usage
+
+The only API is `pdd-exec`:
+```
+(pdd-exec CMD &rest ARGS &key ENV AS FILTER INIT DONE FAIL FINE &allow-other-keys)
+
+  CMD:     Executable name (string, list, vector or t)
+           * if this is t, ARGS will be wrapped to shell command
+  ARGS:    List of command arguments
+           * Element can be string, symbol, list or vector
+           * They will be auto flatten and stringify, so write any way you want
+  ENV:     Extra process environment settings, string or list
+  AS:      Transform process output specify type, function or abbrev symbol
+           * If this is symbol line, split result to lines list
+           * If this is a function, use its return value as result
+           * Otherwise, just return the process output literally
+  FILTER:  Process filter function (lambda (process string))
+  INIT:    Post-creation callback (lambda (process))
+           * If TYPE is pipe, and this is a string, then send it to proc pipe
+           * If this is a function, just do something to proc manually with it
+  DONE:    Success callback (lambda (output exit-status))
+  FAIL:    Error handler (lambda (error-message))
+  FINE:    Finalizer (lambda (process))
+
+Returns a ‘pdd-task’ object that can be canceled using ‘pdd-signal’
+```
+
+Smart cmd and args syntax:
+```emacs-lisp
+(pdd-exec "ls" :done #'print)
+(pdd-exec "ls" "-a" "-l" :done #'print)
+(pdd-exec "ls" "-a -l" :done #'print)
+(pdd-exec "ls" '("-a -l")) ; those in list will not be splitted
+(pdd-exec 'ls '(-a -r) '-l :done #'print) ; auto stringify
+(pdd-exec [ls -a -r] :done #'print) ; vector is like list
+(pdd-exec "ls -a -r" :done #'print) ; shell command format string
+(pdd-exec t '(tee "~/aaa.txt") :init "pipe this to tee to save") ; t: execute as shell command
+```
+
+Bind extra proc environments:
+```emacs-lisp
+(pdd-exec 'ls :env "X=11") ; a string for only one
+(pdd-exec 'ls :env '("X=11" "Y=22")) ; a list for multiple
+(pdd-exec 'ls :env '((x . 11) (y . 22))) ; alist is recommended
+(pdd-exec 'ls :env '((xpath f1 f2) (x . 33))) ; paths auto join
+```
+
+Callbacks for convenience:
+```emacs-lisp
+(pdd-exec '(ls -l) :as 'line :done 'print)
+(pdd-exec '(ls -l) :as 'my-parse-fn :done 'my-done-fn)
+
+(pdd-exec 'ls
+  :init (lambda (proc) (extra-init-job proc))
+  :done (lambda (res)  (message "%s" res))
+  :fail (lambda (err)  (message "EEE: %s" err))
+  :fine (lambda (proc) (extra-clean-up proc)))
+```
+
+Play with task system:
+```
+(pdd-chain (pdd-exec [ip addr] :as 'line)
+  (lambda (r) (cl-remove-if-not (lambda (e) (string-match-p "^[0-9]" e)) r))
+  (lambda (r) (mapcar (lambda (e) (cadr (split-string e ":"))) r))
+  (lambda (r) (pdd-interval 1 5 (lambda (i) (message "> Countdown: %d" (- 6 i))) :done r))
+  (lambda (r) (message "Get interface: %s" (nth (random (length r)) r))))
+```
+
+## Example 1. interact with other tasks
 
 Case just for demo:
 - get the git log,

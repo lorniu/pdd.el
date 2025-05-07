@@ -1012,16 +1012,12 @@ Return a `pdd-task' object representing the scheduled task which has two values
 to be resolves: (index-of-interval-task-when-quit, return-value).
 
 Example:
-
-    (pdd-interval 1 5
-      (lambda (i)
-        (message \"Seq #%d\" i)))
-
-    (pdd-interval 1 t
-      (lambda (i ret)
-        (if (> (random 10) 5)
-            (funcall ret 777777))
-          (message \"Seq #%d\" i)))
+    (pdd-interval 1 5 (lambda () (print (float-time))))
+    (pdd-interval 1 5 (lambda (i) (message \"Seq #%d\" i)))
+    (pdd-interval 1 t (lambda (i ret)
+                        (if (> (random 10) 5)
+                          (funcall ret 666))
+                        (message \"Seq #%d\" i)))
 
     ;; Task chain
     (pdd-then
@@ -1133,14 +1129,13 @@ Callbacks for convenience:
     :fail (lambda (err)  (message \"EEE: %s\" err))
     :fine (lambda (proc) (extra-clean-up proc)))
 
-Play with task chain:
+Play with task system:
 
-  (pdd-chain (pdd-exec [ip addr])
-    (lambda (r) (split-string r \"\\n\"))
+  (pdd-chain (pdd-exec [ip addr] :as \\='line)
     (lambda (r) (cl-remove-if-not (lambda (e) (string-match-p \"^[0-9]\" e)) r))
     (lambda (r) (mapcar (lambda (e) (cadr (split-string e \":\"))) r))
-    (lambda (r) (pdd-interval 1 5 (lambda (i) (message \"%s\" i)) :done r))
-    (lambda (r) (message \"> %s\" (nth (random (length r)) r))))
+    (lambda (r) (pdd-interval 1 5 (lambda (i) (message \"> %d\" i)) :done r))
+    (lambda (r) (message \"Get interface: %s\" (nth (random (length r)) r))))
 
 Returns a `pdd-task' object that can be canceled using `pdd-signal'"
   (declare (indent defun))
