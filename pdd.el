@@ -936,6 +936,17 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
         (if fine (pdd-funcall fine (list fine-arg)))))))
 
 ;;;###autoload
+(defun pdd-expire (time)
+  "Create a new task that reject with timeout at time TIME.
+TIME is same as the argument of `run-at-time'."
+  (pdd-with-new-task
+   (let ((timer (run-at-time time nil (lambda () (pdd-reject it 'timeout)))))
+     :signal (lambda ()
+               (if timer (cancel-timer timer))
+               (pdd-reject it 'abort))
+     (puthash timer it pdd-task--timer-pool))))
+
+;;;###autoload
 (defun pdd-delay (time &optional value)
   "Create a promise that resolve VALUE after a specified TIME delay.
 
@@ -967,17 +978,6 @@ Examples:
                                        (setq value (funcall value)))
                                      (pdd-resolve it value))
                                  (error (pdd-reject it err))))))))
-     :signal (lambda ()
-               (if timer (cancel-timer timer))
-               (pdd-reject it 'abort))
-     (puthash timer it pdd-task--timer-pool))))
-
-;;;###autoload
-(defun pdd-timeout (time)
-  "Create a new task that reject with timeout at time TIME.
-TIME is same as the argument of `run-at-time'."
-  (pdd-with-new-task
-   (let ((timer (run-at-time time nil (lambda () (pdd-reject it 'timeout)))))
      :signal (lambda ()
                (if timer (cancel-timer timer))
                (pdd-reject it 'abort))
@@ -1058,7 +1058,6 @@ Example:
                            (pdd-reject task v context)
                          (pdd-resolve task v n)))))
      (unless count (setq count 1))
-     :signal (lambda () (funcall return-fn 'abort t))
      (when init
        (run-at-time 0 nil (lambda () (pdd-funcall init (list timer)))))
      (setq timer
@@ -1076,20 +1075,21 @@ Example:
                                (pdd-funcall func (list n return-fn timer)))))
                        (error (funcall return-fn err t))))))
      (setq it (pdd--wrap-task-handlers it done fail fine timer))
+     :signal (lambda () (funcall return-fn 'abort t))
      (puthash timer it pdd-task--timer-pool))))
 
 (defvar pdd--proc-send-need-newline '("tee" "echo"))
 
 ;;;###autoload
-(cl-defun pdd-process (cmd &rest args &key env as filter init done fail fine &allow-other-keys)
+(cl-defun pdd-exec (cmd &rest args &key env as filter init done fail fine &allow-other-keys)
   "Create a promise-based task for managing external processes.
 
 Arguments:
 
-  CMD:     Executable name (string)
+  CMD:     Executable name (string, list, vector or t)
            * if this is t, ARGS will be wrapped to shell command
   ARGS:    List of command arguments
-           * Element can be string, symbol or list
+           * Element can be string, symbol, list or vector
            * They will be auto flatten and stringify, so write any way you want
   ENV:     Extra process environment settings, string or list
   AS:      Transform process output specify type, function or abbrev symbol
@@ -1106,27 +1106,28 @@ Arguments:
 
 Smart cmd and args syntax:
 
-  (pdd-process \"ls\" :done #\\='print)
-  (pdd-process \"ls\" \"-a\" \"-l\" :done #\\='print)
-  (pdd-process \"ls\" \"-a -l\" :done #\\='print)
-  (pdd-process \"ls\" \\='(\"-a -l\")) ; those in list will not be splitted
-  (pdd-process \\='ls \\='(-a -r) \\='-l :done #\\='print) ; auto stringify
-  (pdd-process \"ls -a -r\" :done #\\='print) ; shell command format string
-  (pdd-process t \\='(tee \"~/aaa.txt\") :init \"pipe this to tee to save\")
+  (pdd-exec \"ls\" :done #\\='print)
+  (pdd-exec \"ls\" \"-a\" \"-l\" :done #\\='print)
+  (pdd-exec \"ls\" \"-a -l\" :done #\\='print)
+  (pdd-exec \"ls\" \\='(\"-a -l\")) ; those in list will not be splitted
+  (pdd-exec \\='ls \\='(-a -r) \\='-l :done #\\='print) ; auto stringify
+  (pdd-exec [ls -a -r] :done #\\='print) ; vector is like list
+  (pdd-exec \"ls -a -r\" :done #\\='print) ; shell command format string
+  (pdd-exec t \\='(tee \"~/aaa.txt\") :init \"pipe this to tee to save\")
 
 Bind extra proc environments:
 
-  (pdd-process \\='ls :env \"X=11\") ; a string for only one
-  (pdd-process \\='ls :env \\='(\"X=11\" \"Y=22\")) ; a list for multiple
-  (pdd-process \\='ls :env \\='((x . 11) (y . 22))) ; alist is recommended
-  (pdd-process \\='ls :env \\='((xpath f1 f2) (x . 33))) ; paths auto join
+  (pdd-exec \\='ls :env \"X=11\") ; a string for only one
+  (pdd-exec \\='ls :env \\='(\"X=11\" \"Y=22\")) ; a list for multiple
+  (pdd-exec \\='ls :env \\='((x . 11) (y . 22))) ; alist is recommended
+  (pdd-exec \\='ls :env \\='((xpath f1 f2) (x . 33))) ; paths auto join
 
 Callbacks for convenience:
 
-  (pdd-process \\='(ls -l) :as \\='line :done \\='print)
-  (pdd-process \\='(ls -l) :as \\='my-parse-fn :done \\='my-done-fn)
+  (pdd-exec \\='(ls -l) :as \\='line :done \\='print)
+  (pdd-exec \\='(ls -l) :as \\='my-parse-fn :done \\='my-done-fn)
 
-  (pdd-process \\='ls
+  (pdd-exec \\='ls
     :init (lambda (proc) (extra-init-job proc))
     :done (lambda (res)  (message \"%s\" res))
     :fail (lambda (err)  (message \"EEE: %s\" err))
@@ -1134,7 +1135,7 @@ Callbacks for convenience:
 
 Play with task chain:
 
-  (pdd-chain (pdd-process \\='ip \"addr\")
+  (pdd-chain (pdd-exec [ip addr])
     (lambda (r) (split-string r \"\\n\"))
     (lambda (r) (cl-remove-if-not (lambda (e) (string-match-p \"^[0-9]\" e)) r))
     (lambda (r) (mapcar (lambda (e) (cadr (split-string e \":\"))) r))
@@ -1148,15 +1149,16 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
     ;; parse arguments, cl-defun is different from common lisp defun
     (cl-loop for arg in (cons cmd args) for i from -1
              until (keywordp arg)
-             append (if (consp arg)
+             append (if (or (vectorp arg) (consp arg))
                         (mapcar (lambda (s)
-                                  (if (or (stringp s) (memq s '(nil t))) s
+                                  (if (or (stringp s) (memq s '(nil t)))
+                                      s
                                     (format "%s" s)))
                                 arg)
-                      (if (memq arg '(nil t)) (list arg)
+                      (if (memq arg '(nil t))
+                          (list arg)
                         (split-string-shell-command (format "%s" arg))))
-             into lst finally
-             (setq cmd-args lst keywords (cl-subseq args i)))
+             into lst finally (setq cmd-args lst keywords (cl-subseq args i)))
     (if (eq (car cmd-args) t) ; shell-command
         (setq program (cadr cmd-args)
               cmd-args (list shell-file-name shell-command-switch
@@ -1220,7 +1222,6 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
                                  (when (buffer-live-p (current-buffer))
                                    (kill-buffer (current-buffer)))
                                  (if fine (pdd-funcall fine (list proc))))))))
-         :signal signal-fn
          (condition-case err
              (progn
                (pdd-log 'cmd "%s: %s %s" proc-name cmd-args proc-envs)
@@ -1240,7 +1241,8 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
                      (process-send-string proc str)
                      (process-send-eof proc)))))
            (error (pdd-reject task (format "Process creation failed: %s" err) context)))
-         (setq it (pdd--wrap-task-handlers it done fail fine proc)))))))
+         (setq it (pdd--wrap-task-handlers it done fail fine proc))
+         :signal signal-fn)))))
 
 ;; Async/Await
 

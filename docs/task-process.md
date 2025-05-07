@@ -18,7 +18,7 @@ Case just for demo:
 (pdd-chain
     ;; git log of the repository, parse to list
     (let ((default-directory "~/source/emacs/"))
-      (pdd-process '(git log --pretty=oneline) :as 'line))
+      (pdd-exec [git log --pretty=oneline] :as 'line))
 
   ;; format and filter
   (lambda (r) (mapcar (lambda (x) (cons (substring x 0 40) (substring x 40))) r))
@@ -35,10 +35,10 @@ Case just for demo:
   (lambda (r) (pdd "https://httpbin.org/anything" :data (format "%s" r)))
 
   ;; write to file using command. t says: wrap the command with shell
-  (lambda (r) (pdd-process t `(tee "~/aaa.xxx") :init r))
+  (lambda (r) (pdd-exec t [tee "~/aaa.xxx"] :init r))
 
   ;; display file content using shell command
-  (lambda (r) (pdd-process t `(cat "~/aaa.xxx") :done #'print))
+  (lambda (r) (pdd-exec t [cat "~/aaa.xxx"] :done #'print))
 
   ;; capture potential exceptions
   :fail (lambda (r) (message "EEE: %s" r)))
@@ -48,7 +48,7 @@ Or with async/await:
 ```emacs-lisp
 (pdd-async
   (let* ((default-directory "~/source/emacs/")
-         (logs (await (pdd-process '(git log --pretty=oneline) :as 'line)))
+         (logs (await (pdd-exec [git log --pretty=oneline] :as 'line)))
          (rpcs (cl-remove-if-not
                 (lambda (x) (string-match-p "jsonrpc"  (cdr x)))
                 (mapcar (lambda (x) (cons (substring x 0 40) (substring x 40))) logs)))
@@ -56,8 +56,8 @@ Or with async/await:
          (r1 (await (pdd "https://httpbin.org/anything" :data data)))
          (_  (await (pdd-delay 3)))                     ; wait
          (r2 (await (pdd "https://httpbin.org/anything" :data (format "%s" r1)))))
-    (await (pdd-process t `(tee "~/aaa.xxx") :init r2)) ; write
-    (pdd-process t `(cat "~/aaa.xxx") :done #'print)))  ; read
+    (await (pdd-exec t [tee "~/aaa.xxx"] :init r2)) ; write
+    (pdd-exec t [cat "~/aaa.xxx"] :done #'print)))  ; read
 ```
 
 ## Example 2. inspect http headers using curl
@@ -65,7 +65,7 @@ Or with async/await:
 Popup a buffer to show the request and response details quickly. This is useful sometimes:
 
 ```emacs-lisp
-(pdd-process '(curl "https://httpbin.org/uuid" -v)
+(pdd-exec [curl "https://httpbin.org/uuid" -v]
   :done (lambda (r)
           (with-current-buffer (get-buffer-create "*curl-result*")
             (let ((inhibit-read-only t))
@@ -81,7 +81,7 @@ Popup a buffer to show the request and response details quickly. This is useful 
 
 Or with async/await syntax:
 ```emacs-lisp
-(pdd-let* ((res (pdd-process `(curl "https://httpbin.org/uuid" -v))))
+(pdd-let* ((res (pdd-exec [curl "https://httpbin.org/uuid" -v])))
   (with-current-buffer (get-buffer-create "*curl-result*")
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -121,13 +121,13 @@ Something like this will be displayed:
 ```emacs-lisp
 (defun my-kill-system-process ()
   (interactive)
-  (pdd-let* ((lines (pdd-process '(ps aux) :as 'line))
+  (pdd-let* ((lines (pdd-exec [ps aux] :as 'line))
              (line (completing-read "Process to kill: " (cdr (await lines)) nil t))
              (strs (split-string line))
              (proc-id (cadr strs))
              (proc-name (car (last strs))))
     (when (y-or-n-p (format "Kill process: %s ?" proc-name))
-      (pdd-process `(kill -9 ,proc-id)
+      (pdd-exec `(kill -9 ,proc-id)
         :done (lambda (_) (message "DONE."))
         :fail (lambda (r) (message "[Fail] %s" r))))))
 ```

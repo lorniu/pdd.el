@@ -63,4 +63,4 @@ The `pdd-interval` can be used in many different scenarios. It can be used in an
   :fail (lambda (rr) (message "Fail: %s" rr)))
 ```
 
-Besides `pdd-interval`, there are also `pdd-delay` and `pdd-timeout`.
+Besides `pdd-interval`, there are also `pdd-delay` and `pdd-expire`.
