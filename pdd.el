@@ -373,7 +373,11 @@ Example:
   "Convert STRING to an Elisp object based on the specified content TYPE."
   (:method ((_ (eql 'json)) string)
            (json-parse-string string :object-type 'alist))
-  (:method ((_ (eql 'xml)) string)
+  (:method ((_ (eql 'dom)) string)
+           (with-temp-buffer
+             (insert string)
+             (libxml-parse-html-region (point-min) (point-max))))
+  (:method ((_ (eql 'dom-strict)) string)
            (with-temp-buffer
              (insert string)
              (libxml-parse-xml-region (point-min) (point-max))))
@@ -2043,7 +2047,7 @@ Make sure this is after data and headers being processed."
             (pdd-string-to-object as pdd-resp-body))
            (t (if-let* ((ct (alist-get 'content-type pdd-resp-headers))
                         (type (cond ((string-match-p "/json" ct) 'json)
-                                    ((string-match-p "\\(application\\|text\\)/xml" ct) 'xml)
+                                    ((string-match-p "\\(application\\|text\\)/xml" ct) 'dom-strict)
                                     (t (intern (car (split-string ct "[; ]")))))))
                   (pdd-string-to-object type pdd-resp-body)
                 pdd-resp-body))))))
