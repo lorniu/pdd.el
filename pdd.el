@@ -1314,18 +1314,19 @@ This is implemented with macro expand to `pdd-then' callback."
                (_ (transform-regular form1 rest-forms))))))
 
        (transform-regular (form1 rest-forms)
-         (setq form1 (transform-expr form1))
-         (if (eq (car-safe form1) :await)
-             (let* ((task (plist-get form1 :await))
-                    (then (plist-get form1 :then))
-                    (placeholder (caadr then))
-                    (body (caddr then)))
-               `(pdd-then (pdd-task-ensure ,task)
-                  (lambda (,placeholder) ,(transform-body (cons body rest-forms)))))
-           `(condition-case err
-                (pdd-then (pdd-task-ensure ,form1)
-                  (lambda (_) ,(transform-body rest-forms)))
-              (error (pdd-reject err)))))
+         (if (null rest-forms) `,form1
+           (setq form1 (transform-expr form1))
+           (if (eq (car-safe form1) :await)
+               (let* ((task (plist-get form1 :await))
+                      (then (plist-get form1 :then))
+                      (placeholder (caadr then))
+                      (body (caddr then)))
+                 `(pdd-then (pdd-task-ensure ,task)
+                    (lambda (,placeholder) ,(transform-body (cons body rest-forms)))))
+             `(condition-case err
+                  (pdd-then (pdd-task-ensure ,form1)
+                    (lambda (_) ,(transform-body rest-forms)))
+                (error (pdd-reject err))))))
 
        (transform-let* (bindings body-forms)
          (if (null bindings) (transform-body body-forms)
