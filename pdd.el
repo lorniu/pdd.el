@@ -377,6 +377,10 @@ Example:
            (with-temp-buffer
              (insert string)
              (libxml-parse-xml-region (point-min) (point-max))))
+  (:method ((_ (eql 'dom)) string)
+           (with-temp-buffer
+             (insert string)
+             (libxml-parse-html-region (point-min) (point-max))))
   string)
 
 (cl-defgeneric pdd-object-to-string (type _object)
