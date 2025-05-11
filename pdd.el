@@ -2274,13 +2274,13 @@ ARGS should a request instances or keywords to build the request."
   "Send REQUEST with url.el as BACKEND."
   (with-slots (url method headers datas binaryp resp filter done fail timeout sync abort-flag) request
     ;; setup proxy
-    (let* ((proxy (pdd-proxy-vars backend request))
-           (socks-server (if proxy nil socks-server))
-           (socks-username (if proxy nil socks-username))
-           (socks-password (if proxy nil socks-password))
-           (origin-url-https (symbol-function 'url-https))
-           (origin-socks-open-network-stream (symbol-function 'socks-open-network-stream))
-           (url-proxy-locator (if proxy (lambda (&rest _) "DIRECT") url-proxy-locator)))
+    (let ((socks-server nil)
+          (socks-username nil)
+          (socks-password nil)
+          (url-proxy-locator (lambda (&rest _) "DIRECT"))
+          (origin-url-https (symbol-function 'url-https))
+          (origin-socks-open-network-stream (symbol-function 'socks-open-network-stream))
+          (proxy (pdd-proxy-vars backend request)))
       ;; It's not an easy thing to make url.el support tls over socks proxy
       ;; - [bug#13833] https://lists.nongnu.org/archive/html/bug-gnu-emacs/2025-03/msg01757.html
       ;; - [bug#53941] https://lists.gnu.org/archive/html/bug-gnu-emacs/2024-09/msg00836.html
