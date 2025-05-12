@@ -101,7 +101,7 @@ A simple benchmark function:
          (beg (current-time))   ; record start time
          (stat-time (lambda () (message "Time used: %.1f" (time-to-seconds (time-since beg)))))
          (pdd-default-queue (pdd-queue :limit concurrent-number :fine stat-time))
-         (pdd-default-backend (pcase backend ('url (pdd-url-backend)) ('plz (pdd-curl-backend)))))
+         (pdd-backend (pcase backend ('url (pdd-url-backend)) ('plz (pdd-curl-backend)))))
     (dotimes (i total)
       (pdd (or url "https://httpbin.org/ip")
         :done (lambda () (message "%s: yes" i))

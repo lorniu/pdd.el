@@ -58,6 +58,15 @@
 ;;    and object-oriented (EIEIO) backend design. This makes it easy to add new
 ;;    features or event entirely new backends.
 ;;
+;; Currently, there are two backends:
+;;
+;;    1. pdd-url-backend, which is the default one
+;;
+;;    2. pdd-curl-backend, which is based on `plz'. You should make sure
+;;       package `plz' and program `curl' are available on your OS to use it:
+;;
+;;       (setq pdd-backend (pdd-curl-backend))
+;;
 ;; Usage:
 ;;
 ;;    (pdd "https://httpbin.org/uuid" #'print)
@@ -413,7 +422,7 @@ It's value should be t or nil.  Default unset means not specified."
                  (const :tag "Synchronous" t)
                  (const :tag "Asynchronous" nil)))
 
-(defcustom pdd-user-agent
+(defcustom pdd-default-user-agent
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36"
   "Default user agent used by request."
   :type 'string)
@@ -437,7 +446,7 @@ function return such a url string proxy."
   (lambda (err) (string-match-p "timeout\\|408" (format "%s" err)))
   "Function determine whether should retry the request.")
 
-(defvar pdd-header-rewrite-rules
+(defcustom pdd-header-rewrite-rules
   '((ct          . ("Content-Type"  . "%s"))
     (ct-bin      . ("Content-Type"  . "application/octet-stream"))
     (json        . ("Content-Type"  . "application/json"))
@@ -461,7 +470,8 @@ Usage Examples:
   (bear \"token\") → (\"Authorization\" . \"Bearer token\")
   (auth \"Basic\" \"creds\") → (\"Authorization\" . \"Basic creds\")
 
-They are be replaced when transforming request.")
+They will be replaced when transforming request."
+  :type 'sexp)
 
 (defvar pdd-default-cookie-jar nil
   "Default cookie jar used when not specified in requests.
@@ -492,18 +502,6 @@ The function is with variadic arguments, signature with (err) or (err req).
 
 When error occurrs and no :fail specified, this will perform as the handler.
 Besides globally set, it also can be dynamically binding in let.")
-
-(defun pdd--default-error-handler (err req)
-  "Default value for `pdd-default-error-handler' to deal with ERR for REQ."
-  (if (atom err)
-      (setq err `(user-error ,err))
-    (when (eq (car err) 'error) ; avoid 'peculiar error'
-      (setf (car err) 'user-error)))
-  (let ((prefix (or (and req (with-no-warnings (oref req abort-flag))) "unhandled error"))
-        (errmsg (if (get (car err) 'error-conditions)
-                    (error-message-string err)
-                  (mapconcat (lambda (e) (format "%s" e)) err ", "))))
-    (message "[%s] %s" prefix (string-trim errmsg))))
 
 (defconst pdd-default-request-transformers
   '(pdd-transform-req-done
@@ -557,7 +555,7 @@ reorder the built-in transformers unless you fully understand the consequences."
       pdd-log-redirect-function
       pdd-base-url
       pdd-default-sync
-      pdd-user-agent
+      pdd-default-user-agent
       pdd-default-proxy
       pdd-default-timeout
       pdd-default-retry
@@ -588,21 +586,7 @@ reorder the built-in transformers unless you fully understand the consequences."
 
 ;; Backend
 
-(defclass pdd-backend ()
-  ((insts :allocation :class :initform nil))
-  "Backend class."
-  :abstract t)
-
-(cl-defmethod make-instance ((class (subclass pdd-backend)) &rest slots)
-  "Ensure CLASS with same SLOTS only has one instance."
-  (if-let* ((key (sha1 (format "%s" slots)))
-            (insts (oref-default class insts))
-            (old (cdr-safe (assoc key insts))))
-      old
-    (let ((inst (cl-call-next-method)))
-      (prog1 inst (oset-default class insts `((,key . ,inst) ,@insts))))))
-
-(defclass pdd-http-backend (pdd-backend)
+(defclass pdd-http-backend ()
   ((user-agent :initarg :user-agent
                :type (or string null))
    (proxy :initarg :proxy
@@ -1795,6 +1779,18 @@ to be called when task is acquired."
                     (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
                     (ignore-errors (pdd-funcall fine (list request)))))))))))
 
+(defun pdd--default-error-handler (err req)
+  "Default value for `pdd-default-error-handler' to deal with ERR for REQ."
+  (if (atom err)
+      (setq err `(user-error ,err))
+    (when (eq (car err) 'error) ; avoid 'peculiar error'
+      (setf (car err) 'user-error)))
+  (let ((prefix (or (and req (oref req abort-flag)) "unhandled error"))
+        (errmsg (if (get (car err) 'error-conditions)
+                    (error-message-string err)
+                  (mapconcat (lambda (e) (format "%s" e)) err ", "))))
+    (message "[%s] %s" prefix (string-trim errmsg))))
+
 (cl-defmethod pdd-transform-req-headers ((request pdd-request))
   "Transform headers with stringfy and abbrev replacement in REQUEST."
   (with-slots (headers) request
@@ -1900,7 +1896,7 @@ to be called when task is acquired."
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'pdd-string-iequal)
-      (push `("User-Agent" . ,(if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-user-agent)) headers))
+      (push `("User-Agent" . ,(if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-default-user-agent)) headers))
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
 
@@ -2434,7 +2430,7 @@ ARGS should a request instances or keywords to build the request."
                                "\n\nTry to install curl and specify the program like this to solve the problem:\n
   (setq plz-curl-program \"c:/msys64/usr/bin/curl.exe\")\n
 Or switch http backend to `pdd-url-backend' instead:\n
-  (setq pdd-default-backend (pdd-url-backend))")))))
+  (setq pdd-backend (pdd-url-backend))")))))
         (if-let* ((res (plz-error-response error))
                   (code (plz-response-status res)))
             (list 'error (pdd-http-code-text code) code)
@@ -2513,7 +2509,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
 
 
 
-(defvar pdd-default-backend (pdd-url-backend)
+(defcustom pdd-backend (pdd-url-backend)
   "Default backend used by `pdd' for HTTP requests.
 
 The value can be either:
@@ -2521,20 +2517,21 @@ The value can be either:
 - A function that returns such a instance, signature (&optional url method)
 
 The function will be evaluated dynamically each time `pdd' is invoked, allowing
-for runtime backend selection based on request parameters.")
+for runtime backend selection based on request parameters."
+  :type 'sexp)
 
 (defvar pdd-inhibit-keywords-absent nil
   "Change this if you don't like the absent keywords feature.")
 
 (defun pdd-ensure-default-backend (args)
-  "Pursue the value of variable `pdd-default-backend' if it is a function.
+  "Pursue the value of variable `pdd-backend' if it is a function.
 ARGS should be the arguments of function `pdd'."
-  (if (functionp pdd-default-backend)
-      (pdd-funcall pdd-default-backend
+  (if (functionp pdd-backend)
+      (pdd-funcall pdd-backend
         (list (car args) (intern-soft
                           (or (plist-get (cdr args) :method)
                               (if (plist-get (cdr args) :data) 'post 'get)))))
-    pdd-default-backend))
+    pdd-backend))
 
 (defun pdd-complete-absent-keywords (&rest args)
   "Add the keywords absent for ARGS used by function `pdd'."
@@ -2557,7 +2554,7 @@ ARGS should be the arguments of function `pdd'."
 
 ;;;###autoload
 (cl-defmethod pdd (&rest args)
-  "Send an HTTP request using the `pdd-default-backend'.
+  "Send an HTTP request using the `pdd-backend'.
 
 This is a convenience method that uses the default backend instead of
 requiring one to be specified explicitly.
@@ -2567,9 +2564,9 @@ Other supported arguments are the same as the generic `pdd' method."
   (let* ((args (if pdd-inhibit-keywords-absent args
                  (apply #'pdd-complete-absent-keywords args)))
          (backend (pdd-ensure-default-backend args)))
-    (unless (and backend (eieio-object-p backend) (object-of-class-p backend 'pdd-backend))
-      (user-error "Make sure `pdd-default-backend' is available.  eg:\n
-(setq pdd-default-backend (pdd-url-backend))\n\n\n"))
+    (unless (and backend (eieio-object-p backend) (object-of-class-p backend 'pdd-http-backend))
+      (user-error "Make sure `pdd-backend' is available.  eg:\n
+(setq pdd-backend (pdd-url-backend))\n\n\n"))
     (apply #'pdd backend args)))
 
 (provide 'pdd)

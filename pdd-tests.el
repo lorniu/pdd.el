@@ -43,8 +43,8 @@
 ;;(setq pdd-default-sync nil)
 ;;(setq pdd-default-sync t)
 ;;(setq pdd-base-url pdd-test-host)
-;;(setq pdd-default-backend (pdd-url-backend))
-;;(setq pdd-default-backend (pdd-curl-backend))
+;;(setq pdd-backend (pdd-url-backend))
+;;(setq pdd-backend (pdd-curl-backend))
 
 (defun pdd-block-and-wait-proc (proc)
   (cl-loop while (ignore-errors (buffer-live-p (process-buffer proc)))
@@ -54,7 +54,7 @@
   "Wrap `pdd' to ease tests."
   (declare (indent 1))
   `(let ((pdd-base-url ,pdd-test-host)
-         (pdd-default-backend (,(intern (format "pdd-%s-backend" backend)))))
+         (pdd-backend (,(intern (format "pdd-%s-backend" backend)))))
      (pdd ,@args)))
 
 (cl-defmacro pdd-deftests (name (&rest forbidens) &rest body)

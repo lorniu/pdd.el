@@ -31,15 +31,15 @@ Send request with function `pdd`:
 ``` emacs-lisp
 (pdd "https://httpbin.org/ip" ...)
 
-;; Change backend through `pdd-default-backend':
+;; Change backend through `pdd-backend':
 
-(setq pdd-default-backend (pdd-url-backend)) ; default, url.el as backend
-(setq pdd-default-backend (pdd-curl-backend)) ; use plz.el based backend
-(setq pdd-default-backend (pdd-url-backend :proxy "socks5://localhost:1085")) ; more options
+(setq pdd-backend (pdd-url-backend)) ; default, url.el as backend
+(setq pdd-backend (pdd-curl-backend)) ; use plz.el based backend
+(setq pdd-backend (pdd-url-backend :proxy "socks5://localhost:1085")) ; more options
 
 ;; Dynamical backend with a function (&optional url method):
 
-(setq pdd-default-backend
+(setq pdd-backend
       (lambda (url _method)
         (if (string-match-p "/image/" url)
             (pdd-curl-backend)
