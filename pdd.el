@@ -685,12 +685,12 @@ Otherwise, create a new `pdd-task' which is rejected because of (car args)."
 If (car ARGS) is `pdd-task' then reject it with reason (cadr args) and maybe
 with more metadata in (cddr args), such as execution context.
 
-Otherwise, create a new `pdd-task' which is rejected because of (car args)."
+Otherwise, create a new `pdd-task' which is rejected because of ARGS."
   (declare (indent 1))
   (if (or (not (car args)) (not (pdd-task-p (car args))))
       (pdd-with-new-task
        (aset it 1 'rejected)
-       (aset it 3 (car args)))
+       (aset it 3 args))
     (let ((task (car args)) (reason (cdr args)))
       (pdd-log 'task "  reject | %s, reason: %s" task reason)
       (pdd-task--settle task 'rejected reason))))
