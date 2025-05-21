@@ -1,4 +1,6 @@
-# HTTP library & Async Toolkit for Emacs
+[![MELPA](https://melpa.org/packages/pdd-badge.svg)](https://melpa.org/#/pdd)
+
+# Mordern HTTP library & Async Toolkit for Emacs
 
 This package provides a robust and elegant library for HTTP requests and asynchronous operations in Emacs. It featuring a single, consistent API that works identically across different backends, maximizing code portability and simplifying development.
 
@@ -23,31 +25,31 @@ Table of contents:
 
 ## Installation
 
-Download the `pdd.el` and place it in your `load-path`.
+Download and load this package via MELPA or other ways. e.g:
+``` emacs-lisp
+(use-package pdd :ensure t)
+```
 
 ## Usage
 
 Send request with function `pdd`:
 ``` emacs-lisp
-(pdd "https://httpbin.org/ip" ...)
+(pdd "https://httpbin.org/ip")
 
-;; Change backend through `pdd-backend':
+;; By default, `url.el' is used as the backend (pdd-url-backend).
+;; You can change backend through `pdd-backend' like this:
 
-(setq pdd-backend (pdd-url-backend)) ; default, url.el as backend
 (setq pdd-backend (pdd-curl-backend)) ; use plz.el based backend
 (setq pdd-backend (pdd-url-backend :proxy "socks5://localhost:1085")) ; more options
 
-;; Dynamical backend with a function (&optional url method):
+;; The value can be a function of signature (&optional url method).
+;; In this case, the backend is dynamically determined in runtime.
 
 (setq pdd-backend
       (lambda (url _method)
         (if (string-match-p "/image/" url)
             (pdd-curl-backend)
           (pdd-url-backend))))
-
-;; The backend can be specified explicitly:
-
-(pdd (pdd-url-backend) "https://httpbin.org/ip" ...)
 ```
 
 More options of the `pdd` function:
@@ -191,7 +193,7 @@ DONE and other callbacks have variadic arguments, use according their signatures
   :done (lambda (raw) (message "RAW: %s" raw)))
 
 (pdd "https://httpbin.org/ip"
-  :as (lambda () (current-buffer)) ; the context of as: process buffer
+  :as #'current-buffer ; the context of as: process buffer
   :done (lambda (proc-buffer) ; the context of done: buffer starting the request
           (message "> work buffer: %s" (current-buffer))
           (message "> resp buffer: %s" proc-buffer)

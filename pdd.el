@@ -1,4 +1,4 @@
-;;; pdd.el --- HTTP library & Async Toolkit -*- lexical-binding: t -*-
+;;; pdd.el --- Mordern HTTP library & Async Toolkit -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2025 lorniu <lorniu@gmail.com>
 
