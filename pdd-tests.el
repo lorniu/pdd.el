@@ -246,7 +246,7 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
 (pdd-deftests streaming ()
   (let ((chunks 0))
     (should (pdd "/stream-bytes/100"
-              :filter (lambda () (cl-incf chunks))
+              :peek (lambda () (cl-incf chunks))
               :done (lambda (r) (setq it r)))
             (and (>= chunks 1) (= (length it) 100)))))
 

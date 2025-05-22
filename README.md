@@ -90,11 +90,11 @@ More options of the `pdd` function:
     :data '(("key" . "value"))
     :done (lambda (res) (print res))))
 
-;; Use :filter to provide logic while every chunk back (for stream feature)
+;; Use :peek to provide logic while every chunk back (for stream feature)
 
 (pdd "https://httpbin.org/post"
   :data '(("key" . "value"))
-  :filter (lambda () (message "%s" (buffer-size)))
+  :peek (lambda () (message "%s" (buffer-size)))
   :done (lambda (res) (message "%s" res)))
 
 ;; The callback :fine will run at last, no matter done or fail, everything is fine
@@ -167,11 +167,11 @@ DONE and other callbacks have variadic arguments, use according their signatures
 (pdd "https://httpbin.org/ip" :done (lambda (_ headers code) (list headers code)))
 (pdd "https://httpbin.org/ip" :done (lambda (body &key request) (list body request)))
 
-;; FILTER: (&key headers process request)
+;; PEEK: (&key headers process request)
 
-(pdd "https://httpbin.org/ip" :filter (lambda () (get-buffer-process (current-buffer))))
-(pdd "https://httpbin.org/ip" :filter (lambda (headers) (message "%s" headers)))
-(pdd "https://httpbin.org/ip" :filter (lambda (&key request) (message "%s" request)))
+(pdd "https://httpbin.org/ip" :peek (lambda () (get-buffer-process (current-buffer))))
+(pdd "https://httpbin.org/ip" :peek (lambda (headers) (message "%s" headers)))
+(pdd "https://httpbin.org/ip" :peek (lambda (&key request) (message "%s" request)))
 
 ;; FAIL: (&key error request text code)
 
@@ -236,7 +236,7 @@ Of course, there are tricks that can make things easier:
 (pdd 'print "https://httpbin.org/anything"
   :headers `(json ua-emacs (bear ,token) ("Accept" . "*/*")))
 
-;; The data/headers/done/filter/timeout/retry can be dynamically bound.
+;; The data/headers/done/peek/timeout/retry can be dynamically bound.
 
 (let ((pdd-default-sync nil)
       (pdd-default-retry 3)
@@ -313,14 +313,13 @@ Download file with progress bar display:
 
 (let ((reporter (make-progress-reporter "Downloading...")))
   (pdd "https://httpbin.org/image/jpeg"
-    :filter (lambda (headers)
-              (let* ((total (string-to-number (alist-get 'content-length headers)))
-                     (percent (format "%.1f%%" (/ (* 100.0 (buffer-size)) total))))
-                (progress-reporter-update reporter percent)))
+    :peek (lambda (headers)
+            (let* ((total (string-to-number (alist-get 'content-length headers)))
+                   (percent (format "%.1f%%" (/ (* 100.0 (buffer-size)) total))))
+              (progress-reporter-update reporter percent)))
     :done (lambda (raw)
-            (with-temp-file "~/aaa.jpeg"
-              (insert raw)
-              (progress-reporter-done reporter)))))
+            (with-temp-file "~/aaa.jpeg" (insert raw))
+            (progress-reporter-done reporter))))
 ```
 
 Scrape all images from a webpage:
@@ -368,7 +367,7 @@ Scrape all images from a webpage:
                             headers
                             data
                             init
-                            filter
+                            peek
                             as
                             done
                             fail
@@ -405,7 +404,7 @@ Keyword Arguments:
              * Function return a string, it will not be auto converted
   :INIT    - Function called before the request is fired by backend:
              (&optional request)
-  :FILTER  - Filter function called during data reception, signature:
+  :PEEK    - Function called during new data reception, signature:
              (&key headers process request)
   :AS      - Preprocess results for DONE, accepts:
              * Symbol, process with `pdd-string-to-object' and `AS' as type

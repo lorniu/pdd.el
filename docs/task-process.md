@@ -9,7 +9,7 @@ Current issue:
 
 The only API is `pdd-exec`:
 ```
-(pdd-exec CMD &rest ARGS &key ENV AS FILTER INIT DONE FAIL FINE &allow-other-keys)
+(pdd-exec CMD &rest ARGS &key ENV AS PEEK INIT DONE FAIL FINE &allow-other-keys)
 
   CMD:     Executable name (string, list, vector or t)
            * if this is t, ARGS will be wrapped to shell command
@@ -21,10 +21,10 @@ The only API is `pdd-exec`:
            * If this is symbol line, split result to lines list
            * If this is a function, use its return value as result
            * Otherwise, just return the process output literally
-  FILTER:  Process filter function (lambda (process string))
   INIT:    Post-creation callback (lambda (process))
            * If TYPE is pipe, and this is a string, then send it to proc pipe
            * If this is a function, just do something to proc manually with it
+  PEEK:    Function to call in filter (lambda (string process))
   DONE:    Success callback (lambda (output exit-status))
   FAIL:    Error handler (lambda (error-message))
   FINE:    Finalizer (lambda (process))

@@ -114,6 +114,7 @@ With function signature: (tag message-string)")
   "Output TAG and STRINGS for debug.
 By default output to *Messages* buffer, if `pdd-log-redirect-function' is
 non-nil then redirect the output to this function instead."
+  (declare (indent 1))
   (let (message messages)
     (dolist (arg strings)
       (if (stringp arg)
@@ -505,7 +506,7 @@ Besides globally set, it also can be dynamically binding in let.")
 
 (defconst pdd-default-request-transformers
   '(pdd-transform-req-done
-    pdd-transform-req-filter
+    pdd-transform-req-peek
     pdd-transform-req-fail
     pdd-transform-req-headers
     pdd-transform-req-cookies
@@ -545,8 +546,8 @@ reorder the built-in transformers unless you fully understand the consequences."
 
 (defvar pdd-default-headers nil)
 (defvar pdd-default-data nil)
+(defvar pdd-default-peek nil)
 (defvar pdd-default-done nil)
-(defvar pdd-default-filter nil)
 
 (eval-when-compile
   (defvar pdd--dynamic-context-vars
@@ -565,8 +566,8 @@ reorder the built-in transformers unless you fully understand the consequences."
       pdd-default-error-handler
       pdd-default-headers
       pdd-default-data
-      pdd-default-done
-      pdd-default-filter)
+      pdd-default-peek
+      pdd-default-done)
     "List of dynamic variables whose bindings should penetrate async callbacks."))
 
 (defun pdd--capture-dynamic-context ()
@@ -1065,7 +1066,7 @@ Example:
 (defvar pdd--proc-send-need-newline '("tee" "echo"))
 
 ;;;###autoload
-(cl-defun pdd-exec (cmd &rest args &key env as filter init done fail fine &allow-other-keys)
+(cl-defun pdd-exec (cmd &rest args &key env as peek init done fail fine &allow-other-keys)
   "Create a promise-based task for managing external processes.
 
 Arguments:
@@ -1080,10 +1081,10 @@ Arguments:
            * If this is symbol line, split result to lines list
            * If this is a function, use its return value as result
            * Otherwise, just return the process output literally
-  FILTER:  Process filter function (lambda (process string))
   INIT:    Post-creation callback (lambda (process))
            * If TYPE is pipe, and this is a string, then send it to proc pipe
            * If this is a function, just do something to proc manually with it
+  PEEK:    Function to call in filter (lambda (string process))
   DONE:    Success callback (lambda (output exit-status))
   FAIL:    Error handler (lambda (error-message))
   FINE:    Finalizer (lambda (process))
@@ -1127,7 +1128,7 @@ Play with task system:
 
 Returns a `pdd-task' object that can be canceled using `pdd-signal'"
   (declare (indent defun))
-  (ignore env as filter init done fail fine) ; parse from args later, add this to silence linter
+  (ignore env as peek init done fail fine) ; parse from args later, add this to silence linter
   (let (cmd-args keywords program)
     ;; parse arguments, cl-defun is different from common lisp defun
     (cl-loop for arg in (cons cmd args) for i from -1
@@ -1147,7 +1148,7 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
               cmd-args (list shell-file-name shell-command-switch
                              (mapconcat #'identity (cdr cmd-args) " ")))
       (setq program (car cmd-args)))
-    (cl-destructuring-bind (&key env as filter init done fail fine &allow-other-keys) keywords
+    (cl-destructuring-bind (&key env as peek init done fail fine &allow-other-keys) keywords
       (pdd-with-new-task
        (let* ((task it)
               (proc nil)
@@ -1171,8 +1172,7 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
               (filter-fn (lambda (p string)
                            (with-current-buffer (process-buffer p)
                              (insert (ansi-color-apply string))
-                             (when filter
-                               (pdd-funcall filter (list string p))))))
+                             (if peek (pdd-funcall peek (list string p))))))
               (as-line-fn (lambda ()
                             (let (lines)
                               (save-excursion
@@ -1380,7 +1380,7 @@ This is implemented with macro expand to `pdd-then' callback."
                                    `((pdd--error-matches-spec-p reason-data ',condition-spec)
                                      ,transformed-handler-chain)))
                                handlers)
-                       (t (pdd-reject reason-data)))
+                            (t (pdd-reject reason-data)))
                     (error (pdd-reject err)))))))))
     `(let ((pdd-default-sync nil)) ,(transform-body body))))
 
@@ -1654,7 +1654,7 @@ to be called when task is acquired."
    (datas      :initform nil         :type (or string null))
    (binaryp    :initform nil         :type boolean)
    (init       :initarg :init        :type (or function null) :initform nil)
-   (filter     :initarg :filter      :type (or function null))
+   (peek       :initarg :peek        :type (or function null))
    (as         :initarg :as          :type (or function symbol null) :initform nil)
    (done       :initarg :done        :type (or function null))
    (fail       :initarg :fail        :type (or function null))
@@ -1703,28 +1703,28 @@ to be called when task is acquired."
                    (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
                    (ignore-errors (pdd-funcall (oref ,request-ref fine) (list ,request-ref))))))))))
 
-(cl-defmethod pdd-transform-req-filter ((request pdd-request))
-  "Construct the :filter callback handler for REQUEST."
-  (with-slots (filter fail abort-flag) request
-    (when-let* ((filter1 filter))
-      (setf filter
+(cl-defmethod pdd-transform-req-peek ((request pdd-request))
+  "Construct the :peek callback handler for REQUEST."
+  (with-slots (peek fail abort-flag) request
+    (when-let* ((peek1 peek))
+      (setf peek
             (lambda ()
               (if abort-flag
-                  (pdd-log 'filter "skip filter (aborted).")
+                  (pdd-log 'peek "skip peek (aborted).")
                 (with-slots (abort-flag fail) request
-                  (pdd-log 'filter "enter")
+                  (pdd-log 'peek "enter")
                   (condition-case err1
-                      (if (zerop (length (pdd-function-arglist filter1)))
+                      (if (zerop (length (pdd-function-arglist peek1)))
                           ;; with no argument
-                          (funcall filter1)
+                          (funcall peek1)
                         ;; arguments: (&optional headers process request)
                         (let* ((headers (pdd-extract-http-headers))
                                (buffer (current-buffer))
                                (process (get-buffer-process buffer)))
-                          (pdd-log 'filter "headers: %s" headers)
-                          (pdd-funcall filter1 (list :headers headers :process process :request request))))
-                    (error (pdd-log 'filter "fail: %s" err1)
-                           (setf abort-flag 'filter)
+                          (pdd-log 'peek "headers: %s" headers)
+                          (pdd-funcall peek1 (list :headers headers :process process :request request))))
+                    (error (pdd-log 'peek "fail: %s" err1)
+                           (setf abort-flag 'peek)
                            (funcall fail err1))))))))))
 
 (cl-defmethod pdd-transform-req-fail ((request pdd-request))
@@ -1917,7 +1917,7 @@ Make sure this is after data and headers being processed."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data timeout retry sync done filter abort-flag buffer backend task queue verbose) request
+  (with-slots (url method params headers data timeout retry sync done peek abort-flag buffer backend task queue verbose) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when (and (slot-boundp request 'params) params)
@@ -1929,8 +1929,8 @@ Make sure this is after data and headers being processed."
       (setf data pdd-default-data))
     (unless (slot-boundp request 'done)
       (setf done pdd-default-done))
-    (unless (slot-boundp request 'filter)
-      (setf filter pdd-default-filter))
+    (unless (slot-boundp request 'peek)
+      (setf peek pdd-default-peek))
     (unless (slot-boundp request 'timeout)
       (setf timeout pdd-default-timeout))
     (unless (slot-boundp request 'retry)
@@ -2062,7 +2062,7 @@ Make sure this is after data and headers being processed."
                             headers
                             data
                             init
-                            filter
+                            peek
                             as
                             done
                             fail
@@ -2101,7 +2101,7 @@ Keyword Arguments:
              * Function return a string, it will not be auto converted
   :INIT    - Function called before the request is fired by backend:
              (&optional request)
-  :FILTER  - Filter function called during data reception, signature:
+  :PEEK    - Function called during new data reception, signature:
              (&key headers process request)
   :AS      - Preprocess results for DONE, accepts:
              * Symbol, process with `pdd-string-to-object' and `AS' as type
@@ -2263,7 +2263,7 @@ ARGS should a request instances or keywords to build the request."
 
 (cl-defmethod pdd ((backend pdd-url-backend) &key request)
   "Send REQUEST with url.el as BACKEND."
-  (with-slots (url method headers datas binaryp resp filter done fail timeout sync abort-flag) request
+  (with-slots (url method headers datas binaryp resp peek done fail timeout sync abort-flag) request
     ;; setup proxy
     (let ((socks-server nil)
           (socks-username nil)
@@ -2355,10 +2355,10 @@ ARGS should a request instances or keywords to build the request."
                 (with-current-buffer proc-buffer
                   (add-hook 'before-change-functions #'pdd-url-cancel-timeout-timer nil t)
                   (setq pdd-url-timeout-timer (run-at-time timeout nil timer-callback)))))
-            ;; :filter support via hook
-            (when filter
+            ;; :peek support via hook
+            (when peek
               (with-current-buffer proc-buffer
-                (setq-local pdd-url-extra-filter filter)
+                (setq-local pdd-url-extra-filter peek)
                 (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t))))
           (if (and sync proc-buffer)
               ;; copy from `url-retrieve-synchronously'
@@ -2438,14 +2438,14 @@ Or switch http backend to `pdd-url-backend' instead:\n
 
 (cl-defmethod pdd ((backend pdd-curl-backend) &key request)
   "Send REQUEST with plz as BACKEND."
-  (with-slots (url method headers datas binaryp resp filter done fail timeout sync abort-flag) request
+  (with-slots (url method headers datas binaryp resp peek done fail timeout sync abort-flag) request
     (let* ((tag (eieio-object-class backend))
            (proxy (pdd-proxy-vars backend request))
            (plz-curl-default-args
             (if proxy (append proxy plz-curl-default-args) plz-curl-default-args))
            (context (pdd--capture-dynamic-context))
-           (filter-fn
-            (when filter
+           (filter
+            (when peek
               (lambda (proc string)
                 (with-current-buffer (process-buffer proc)
                   (save-excursion
@@ -2453,10 +2453,10 @@ Or switch http backend to `pdd-url-backend' instead:\n
                     (save-excursion (insert string))
                     (when (re-search-forward plz-http-end-of-headers-regexp nil t)
                       (save-restriction
-                        ;; it's better to provide a narrowed buffer to :filter
+                        ;; it's better to provide a narrowed buffer to :peek
                         (narrow-to-region (point) (point-max))
                         (pdd--with-restored-dynamic-context context
-                          (funcall filter)))))))))
+                          (funcall peek)))))))))
            (results (lambda ()
                       (pdd--with-restored-dynamic-context context
                         (pdd-log tag "before resp")
@@ -2477,7 +2477,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
                            :body-type (if binaryp 'binary 'text)
                            :decode nil
                            :as results
-                           :filter filter-fn
+                           :filter filter
                            :then 'sync
                            :connect-timeout timeout)))
                 (if abort-flag
@@ -2494,7 +2494,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
           :body-type (if binaryp 'binary 'text)
           :decode nil
           :as results
-          :filter filter-fn
+          :filter filter
           :then (lambda (res)
                   (pdd--with-restored-dynamic-context context
                     (if abort-flag
