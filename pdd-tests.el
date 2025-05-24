@@ -40,8 +40,8 @@
 (defvar pdd-test-host "https://httpbin.org")
 
 ;;(setq pdd-debug nil)
-;;(setq pdd-default-sync nil)
-;;(setq pdd-default-sync t)
+;;(setq pdd-sync nil)
+;;(setq pdd-sync t)
 ;;(setq pdd-base-url pdd-test-host)
 ;;(setq pdd-backend (pdd-url-backend))
 ;;(setq pdd-backend (pdd-curl-backend))
@@ -79,7 +79,7 @@
                            (memq (intern (format "%s%s" backend sync)) forbidens))
                  `(let* ,@(let* ((letv (when (memq (caar body) '(let let*)) (cadar body)))
                                  (bodyv (if letv (nthcdr 2 (car body)) body)))
-                            `(((pdd-default-sync ,sync) ,@letv)
+                            `(((pdd-sync ,sync) ,@letv)
                               ,@(mapcar (lambda (expr)
                                           (setq expr (walk-inject expr backend sync))
                                           (when (eq (car expr) 'should)
@@ -300,12 +300,12 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
 (pdd-deftests timeout-and-retry (curl)
   (let ((retry-count 0) finished)
     (should (pdd "/delay/2"
-              :timeout 1 :retry 0
+              :timeout 1 :max-retry 0
               :fail (lambda (err) (setq it (format "%s" err))))
             (string-match-p "408\\|timeout" it))
     (should (pdd "/delay/3"
               :init (lambda () (cl-incf retry-count))
-              :timeout 2 :retry 2
+              :timeout 2 :max-retry 2
               :fail (lambda (&key text code) (setq it (cons text code)))
               :fine (lambda () (setq finished t)))
             (while (not finished) (sleep-for 0.2))
