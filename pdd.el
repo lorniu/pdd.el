@@ -2182,15 +2182,17 @@ ARGS should a request instances or keywords to build the request."
 (defvar url-http-transfer-encoding)
 (defvar url-http-response-status)
 (defvar url-http-response-version)
+(defvar url-redirect-buffer)
 
 (defvar socks-server)
 (defvar socks-username)
 (defvar socks-password)
 (defvar tls-params)
 
-(defvar pdd-url-extra-filter nil)
-(defvar pdd-url-inhibit-proxy-fallback nil)
+(defvar-local pdd-url-extra-filter nil)
+(defvar-local pdd-url-local-headers nil)
 (defvar-local pdd-url-timeout-timer nil)
+(defvar pdd-url-inhibit-proxy-fallback nil)
 
 (cl-defmethod pdd-proxy-vars ((_ pdd-url-backend) (request pdd-request))
   "Serialize proxy config for url REQUEST."
@@ -2232,15 +2234,28 @@ ARGS should a request instances or keywords to build the request."
            (setf abort-flag 'conn)
            `(http "Response empty content, maybe something error" 417)))))
 
+(defun pdd-url-migrate-status-to-redirect ()
+  "Try to migrate the hooks and status to the redirect buffer."
+  (when (and pdd-url-extra-filter url-redirect-buffer (buffer-live-p url-redirect-buffer))
+    (let ((filter pdd-url-extra-filter))
+      (with-current-buffer url-redirect-buffer
+        (setq pdd-url-extra-filter filter)
+        (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)
+        (add-hook 'kill-buffer-hook #'pdd-url-migrate-status-to-redirect nil t)))))
+
 (defun pdd-url-http-extra-filter (beg end len)
-  "Call `pdd-url-extra-filter'.  BEG, END and LEN see `after-change-functions'."
-  (when (and pdd-url-extra-filter (bound-and-true-p url-http-end-of-headers)
-             (if (equal url-http-transfer-encoding "chunked") (= beg end) ; when delete
-               (= len 0))) ; when insert
-    (save-excursion
-      (save-restriction
-        (narrow-to-region url-http-end-of-headers (point-max))
-        (funcall pdd-url-extra-filter)))))
+  "Call `pdd-url-extra-filter'. BEG, END and LEN see `after-change-functions'."
+  (when-let* ((filter pdd-url-extra-filter))
+    (when (and (> (point-max) 1) (bound-and-true-p url-http-end-of-headers))
+      (unless pdd-url-local-headers
+        (setq pdd-url-local-headers (ignore-errors (pdd-extract-http-headers))))
+      (when (and pdd-url-local-headers (not (alist-get 'location pdd-url-local-headers)))
+        (when (if (equal url-http-transfer-encoding "chunked") (= beg end) ; when delete
+                (= len 0)) ; when insert
+          (save-excursion
+            (save-restriction
+              (narrow-to-region url-http-end-of-headers (point-max))
+              (funcall filter))))))))
 
 (defun pdd-url-cancel-timeout-timer (_ _)
   "Cancel timer for :timeout when any data returned in filter."
@@ -2288,19 +2303,20 @@ ARGS should a request instances or keywords to build the request."
               ((stringp proxy)
                (setq url-proxy-locator (lambda (&rest _) (concat "PROXY " proxy)))))
         ;; start url-retrive
-        (let* ((url-request-method (string-to-unibyte (upcase (format "%s" method))))
+        (let* ((context (pdd--capture-dynamic-context))
+               (url-request-method (string-to-unibyte (upcase (format "%s" method))))
                (url-request-data datas)
                (url-user-agent (alist-get "user-agent" headers nil nil #'pdd-string-iequal))
                (url-request-extra-headers (assoc-delete-all "user-agent" headers #'pdd-string-iequal))
                (url-mime-encoding-string "identity")
-               (context (pdd--capture-dynamic-context))
-               buffer-data data-buffer
-               (callback (lambda (status)
+               init-buffer init-process final-buffer final-data
+               (final-cb (lambda (status)
                            (unwind-protect
                                (pdd--with-restored-dynamic-context context
                                  (ignore-errors (cancel-timer pdd-url-timeout-timer))
-                                 (setq data-buffer (current-buffer))
+                                 (setq final-buffer (current-buffer))
                                  (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
+                                 (remove-hook 'kill-buffer-hook #'pdd-url-migrate-status-to-redirect)
                                  (pdd-log 'url-backend "URL-CALLBACK! flag: %s, timer: %s" abort-flag pdd-url-timeout-timer)
                                  (if abort-flag
                                      (pdd-log 'url-backend "skip done (aborted or timeout).")
@@ -2309,11 +2325,11 @@ ARGS should a request instances or keywords to build the request."
                                            (progn (pdd-log 'url-backend "before fail")
                                                   (funcall fail err))
                                          (pdd-log 'url-backend "before done")
-                                         (setq buffer-data (pdd-funcall done (pdd-transform-response request))))
+                                         (setq final-data (pdd-funcall done (pdd-transform-response request))))
                                      (error (funcall fail err1)))))
-                             (kill-buffer data-buffer))))
-               (proc-buffer (url-retrieve url callback nil t t))
-               (process (get-buffer-process proc-buffer)))
+                             (kill-buffer final-buffer)))))
+          (setq init-buffer (url-retrieve url final-cb nil t t)
+                init-process (get-buffer-process init-buffer))
           (pdd-log 'url-backend
             "%s %s"             url-request-method url
             "HEADER: %S"        url-request-extra-headers
@@ -2322,14 +2338,14 @@ ARGS should a request instances or keywords to build the request."
             "Proxy: %S"         proxy
             "User Agent: %s"    url-user-agent
             "MIME Encoding: %s" url-mime-encoding-string)
-          (when (buffer-live-p proc-buffer)
-            (oset request process process)
+          (when (buffer-live-p init-buffer)
+            (oset request process init-process)
             ;; :timeout support via timer
             (when (numberp timeout)
               (let ((timer-callback
                      (lambda ()
                        (let ((proc (oref request process)) buf)
-                         (when (and (not data-buffer) (not abort-flag) proc)
+                         (when (and (not final-buffer) (not abort-flag) proc)
                            (pdd--with-restored-dynamic-context context
                              (setf abort-flag 'timeout)
                              (ignore-errors (setq buf (process-buffer proc)))
@@ -2338,31 +2354,32 @@ ARGS should a request instances or keywords to build the request."
                              (ignore-errors (kill-buffer buf))
                              (pdd-log 'timeout "TIMEOUT timer triggered")
                              (funcall fail '(timeout "Request timeout" 408))))))))
-                (with-current-buffer proc-buffer
+                (with-current-buffer init-buffer
                   (add-hook 'before-change-functions #'pdd-url-cancel-timeout-timer nil t)
                   (setq pdd-url-timeout-timer (run-at-time timeout nil timer-callback)))))
             ;; :peek support via hook
             (when peek
-              (with-current-buffer proc-buffer
-                (setq-local pdd-url-extra-filter peek)
-                (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t))))
-          (if (and sync proc-buffer)
+              (with-current-buffer init-buffer
+                (setq pdd-url-extra-filter peek)
+                (add-hook 'after-change-functions #'pdd-url-http-extra-filter nil t)
+                (add-hook 'kill-buffer-hook #'pdd-url-migrate-status-to-redirect nil t))))
+          (if (and sync init-buffer)
               ;; copy from `url-retrieve-synchronously'
               (catch 'pdd-done
-                (when-let* ((redirect-buffer (buffer-local-value 'url-redirect-buffer proc-buffer)))
-                  (unless (eq redirect-buffer proc-buffer)
+                (when-let* ((redirect-buffer (buffer-local-value 'url-redirect-buffer init-buffer)))
+                  (unless (eq redirect-buffer init-buffer)
                     (let (kill-buffer-query-functions)
-                      (kill-buffer proc-buffer))
-                    (setq proc-buffer redirect-buffer)))
-                (when-let* ((proc (get-buffer-process proc-buffer)))
+                      (kill-buffer init-buffer))
+                    (setq init-buffer redirect-buffer)))
+                (when-let* ((proc (get-buffer-process init-buffer)))
                   (when (memq (process-status proc) '(closed exit signal failed))
-                    (unless data-buffer
+                    (unless final-buffer
 		              (throw 'pdd-done 'exception))))
                 (with-local-quit
-                  (while (and (process-live-p process) (not abort-flag) (not data-buffer))
+                  (while (and (process-live-p init-process) (not abort-flag) (not final-buffer))
                     (accept-process-output nil 0.05)))
-                buffer-data)
-            process))))))
+                final-data)
+            init-process))))))
 
 
 ;;; Implement for plz.el
