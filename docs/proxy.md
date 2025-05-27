@@ -26,17 +26,17 @@ Configure proxies support different levels:
 (pdd aaa "https://httpbin.org/ip")
 
 ;; Global Default Proxy:
-(setq pdd-default-proxy "socks5://127.0.0.1:1080")
+(setq pdd-proxy "socks5://127.0.0.1:1080")
 ```
 
 To make proxy smarter, use a function instead of the url string, the function signature is (&optional request backend).
 
 ```emacs-lisp
 ;; Just return a url format string as proxy
-(setq pdd-default-proxy (lambda () "https://proxy:1080"))
+(setq pdd-proxy (lambda () "https://proxy:1080"))
 
 ;; You can do much more in the function
-(setq pdd-default-proxy
+(setq pdd-proxy
       (lambda (request)
         (with-slots (url) request
           (cond
@@ -49,16 +49,16 @@ If the proxy need authorization, embed the credentials into url:
 ```emacs-lisp
 ;; URL-Embedded Credentials
 
-(setq pdd-default-proxy "http://tom:666@127.0.0.1:1080")
+(setq pdd-proxy "http://tom:666@127.0.0.1:1080")
 
 ;; Configure in ~/.authinfo:
 ;; machine proxy.example.com port 8080 login user password pass
 
-(setq pdd-default-proxy "http://user@proxy.example.com:8080")
+(setq pdd-proxy "http://user@proxy.example.com:8080")
 
 ;; Programmatic Credential Resolution:
 
-(setq pdd-default-proxy
+(setq pdd-proxy
       (lambda (request)
         (let ((creds (lookup-credentials (oref request url))))
           (format "http://%s:%s@proxy:8080" (car creds) (cdr creds)))))
@@ -68,7 +68,7 @@ If the proxy need authorization, embed the credentials into url:
 
 Backend-Specific Proxies:
 ```emacs-lisp
-(setq pdd-default-proxy
+(setq pdd-proxy
       (lambda (_ backend)
         (if (cl-typep backend 'pdd-url-backend)
             "https://127.0.0.1:1081"
@@ -77,7 +77,7 @@ Backend-Specific Proxies:
 
 Protocol-Specific Proxies:
 ```emacs-lisp
-(setq pdd-default-proxy
+(setq pdd-proxy
       (lambda (req)
         (pcase (url-type (url-generic-parse-url (oref req url)))
           ("https" "http://ssl-proxy:8080")
@@ -87,7 +87,7 @@ Protocol-Specific Proxies:
 
 Traffic Shaping:
 ```emacs-lisp
-(setq pdd-default-proxy
+(setq pdd-proxy
       (lambda (request)
         (with-slots (data) request
           ;; Route large uploads through high-bandwidth proxy
@@ -101,7 +101,7 @@ Failover Proxies (can extend to a proxy pool):
 (defvar pdd-proxy-list
   '("http://primary:8080" "http://secondary:8080"))
 
-(setq pdd-default-proxy
+(setq pdd-proxy
       (lambda ()
         (cl-loop for proxy in (sort pdd-proxy-list #'proxy-priority)
                  when (proxy-available-p proxy)

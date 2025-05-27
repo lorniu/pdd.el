@@ -127,7 +127,7 @@ This task is implemented with three different ways, all are asynchronous and wil
 ### B. with task syntax
 
 ```emacs-lisp
-(let* ((pdd-default-sync nil)
+(let* ((pdd-sync nil)
        (t1 (pdd-delay 3 "https://httpbin.org/ip"))
        (t2 (pdd-then t1 (lambda (r) (pdd r))))
        (t3 (pdd-then t2 (lambda (r) (pdd-delay 2 "https://httpbin.org/anything"))))

@@ -184,7 +184,79 @@ Something like this will be displayed:
 * Connection #0 to host httpbin.org left intact
 ```
 
-## Example 3. a command to kill system process in Emacs
+## Example 3. refactor example 2
+
+It looks like using a separate buffer to display content is quite common, so separate out:
+```emacs-lisp
+(defmacro pdd:with-current-view-buffer (buffer &rest keywords-and-body)
+  "Similar as `with-current-buffer' but popup the buffer at last in view mode.
+Usage: (pdd:with-current-view-buffer :focus/:append/:wc/:fontify/:post... (insert ...))"
+  (declare (indent 1))
+  (let (append focus wc fontify post body)
+    (setq body
+          (cl-loop for lst on keywords-and-body by #'cddr
+                   if (and (keywordp (car lst)) (cdr lst))
+                   do (pcase (car lst)
+                        (:append (setq append (cadr lst)))
+                        (:focus (setq focus (cadr lst)))
+                        (:wc (setq wc (cadr lst)))
+                        (:fontify (setq fontify (cadr lst)))
+                        (:post (setq post (cadr lst))))
+                   else return lst))
+    `(with-current-buffer ,(if (stringp buffer) `(get-buffer-create ,buffer) buffer)
+       (let ((inhibit-read-only t))
+         (goto-char (point-max))
+         ,(if append
+              `(insert (if (> (point) (point-min)) "\n" ""))
+            `(erase-buffer))
+         (save-excursion ,@body)
+         ,(if (symbolp post) `(eval ,post) post)
+         (special-mode)
+         ,@(when fontify
+             `((font-lock-add-keywords nil ,fontify)
+               (font-lock-flush)))
+         (set-buffer-modified-p nil)
+         (,(if focus 'pop-to-buffer 'display-buffer) (current-buffer) ,wc)))))
+
+(cl-defun pdd:buffer-view (message &key buffer (focus t) (wc '((display-buffer-below-selected))) fontify post)
+  "Popup a buffer to display message."
+  (let ((buf (or buffer (get-buffer-create (format "*view-%d*" (float-time))))))
+    (pdd:with-current-view-buffer buf
+      :fontify fontify :post post :wc wc
+      (insert (if (stringp message) message (format "%s" message))))
+    (if focus (pop-to-buffer buf))))
+
+;; (pdd:buffer-view "hello world")
+;; (pdd:buffer-view "hello world" :buffer (get-buffer-create "abc") :wc '((display-buffer-at-bottom)))
+```
+
+Then, inspecting http headers using curl can be simplified to:
+```emacs-lisp
+(pdd-exec [curl https://httpbin.org/uuid -v] :done #'pdd:buffer-view)
+
+(pdd-exec [curl https://httpbin.org/uuid -v]
+  :done (lambda (r)
+          (pdd:buffer-view r
+            :fontify '(("^\\* .*" . font-lock-comment-face)
+                       ("^[<>] .*" . font-lock-string-face)))))
+```
+
+Many shell commands can be used in conjunction with `pdd:buffer-view`, it is quite convenient:
+```emacs-lisp
+(pdd-exec [lsof] :done 'pdd:buffer-view)
+(pdd-exec [ip addr] :done 'pdd:buffer-view)
+(pdd-exec [brew list] :done 'pdd:buffer-view)
+(pdd-exec t [awk "/load/{print}" ~/.emacs.d/init.el] :done 'pdd:buffer-view)
+```
+
+Furthermore, perhaps such a command would be quite practical (`M-x pdd:execute-and-show`):
+```emacs-lisp
+(defun pdd:exec-and-show (&optional cmd)
+  (interactive (list (read-string "Command to execute: ")))
+  (pdd-exec t (list cmd) :done 'pdd:buffer-view))
+```
+
+## Example 4. a command to kill system process in Emacs
 
 ```emacs-lisp
 (defun my-kill-system-process ()

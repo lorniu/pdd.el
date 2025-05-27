@@ -1,4 +1,4 @@
-;;; pdd.el --- Mordern HTTP library & Async Toolkit -*- lexical-binding: t -*-
+;;; pdd.el --- HTTP library & Async Toolkit -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2025 lorniu <lorniu@gmail.com>
 
@@ -106,13 +106,13 @@
   "Debug flag."
   :type '(choice boolean symbol))
 
-(defvar pdd-log-redirect-function nil
+(defvar pdd-log-redirect nil
   "Redirect output of `pdd-log' to this function.
 With function signature: (tag message-string)")
 
 (defmacro pdd-log (tag &rest strings)
   "Output TAG and STRINGS for debug.
-By default output to *Messages* buffer, if `pdd-log-redirect-function' is
+By default output to *Messages* buffer, if `pdd-log-redirect' is
 non-nil then redirect the output to this function instead."
   (declare (indent 1))
   (let (message messages)
@@ -125,9 +125,9 @@ non-nil then redirect the output to this function instead."
     (setq messages (reverse messages))
     `(when (and pdd-debug
                 (or (eq ,tag pdd-debug) (and (eq pdd-debug t) (not (eq ,tag 'task)))))
-       (if pdd-log-redirect-function
+       (if pdd-log-redirect
            (progn ,@(cl-loop for message in messages
-                             collect `(funcall pdd-log-redirect-function ,tag (format ,@message))))
+                             collect `(funcall pdd-log-redirect ,tag (format ,@message))))
          ,@(cl-loop for message in messages
                     collect `(message ,(concat "[%s] " (car message))
                                       ,(or tag "pdd") ,@(cdr message)))))))
@@ -416,36 +416,38 @@ Example:
 Use as dynamical binding usually."
   :type '(choice (const nil) string))
 
-(defcustom pdd-default-sync 'unset
+(defcustom pdd-sync 'unset
   "The sync style when no :sync specified explicitly for function `pdd'.
 It's value should be t or nil.  Default unset means not specified."
   :type '(choice (const :tag "Unspecified" unset)
                  (const :tag "Synchronous" t)
                  (const :tag "Asynchronous" nil)))
 
-(defcustom pdd-default-user-agent
+(defcustom pdd-user-agent
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.75 Safari/537.36"
   "Default user agent used by request."
   :type 'string)
 
-(defcustom pdd-default-proxy nil
+(defcustom pdd-proxy nil
   "Default proxy used by the http request.
 
 This should be a url string in format proto://[user:pass@]host:port or a
 function return such a url string proxy."
   :type '(choice (choice (const nil) string) string function))
 
-(defcustom pdd-default-timeout 30
+(defcustom pdd-timeout 30
   "Default timetout seconds for the request."
   :type 'natnum)
 
-(defcustom pdd-default-retry 1
-  "Default retry times when request timeout."
+(defcustom pdd-max-retry 1
+  "Default max retry times when request timeout."
   :type 'natnum)
 
 (defvar pdd-retry-condition
   (lambda (err) (string-match-p "timeout\\|408" (format "%s" err)))
   "Function determine whether should retry the request.")
+
+(defvar pdd-verbose nil)
 
 (defcustom pdd-header-rewrite-rules
   '((ct          . ("Content-Type"  . "%s"))
@@ -493,8 +495,6 @@ The value can be either:
 
 This variable is used as a fallback when no queue is explicitly provided
 in individual requests.")
-
-(defvar pdd-default-verbose nil)
 
 (defvar pdd-default-error-handler #'pdd--default-error-handler
   "Default error handler that display errors when they are not handled by user.
@@ -544,30 +544,30 @@ stages.  While you may change them by override `pdd-response-transformers' to
 add additional transformers to extend functionality, you should not remove or
 reorder the built-in transformers unless you fully understand the consequences.")
 
-(defvar pdd-default-headers nil)
-(defvar pdd-default-data nil)
-(defvar pdd-default-peek nil)
-(defvar pdd-default-done nil)
+(defvar pdd-headers nil)
+(defvar pdd-data nil)
+(defvar pdd-peek nil)
+(defvar pdd-done nil)
 
 (eval-when-compile
   (defvar pdd--dynamic-context-vars
     '(default-directory
       pdd-debug
-      pdd-log-redirect-function
+      pdd-log-redirect
       pdd-base-url
-      pdd-default-sync
-      pdd-default-user-agent
-      pdd-default-proxy
-      pdd-default-timeout
-      pdd-default-retry
+      pdd-sync
+      pdd-user-agent
+      pdd-proxy
+      pdd-timeout
+      pdd-max-retry
+      pdd-verbose
       pdd-default-cookie-jar
       pdd-default-queue
-      pdd-default-verbose
       pdd-default-error-handler
-      pdd-default-headers
-      pdd-default-data
-      pdd-default-peek
-      pdd-default-done)
+      pdd-headers
+      pdd-data
+      pdd-peek
+      pdd-done)
     "List of dynamic variables whose bindings should penetrate async callbacks."))
 
 (defun pdd--capture-dynamic-context ()
@@ -585,7 +585,7 @@ reorder the built-in transformers unless you fully understand the consequences."
                       (mapcar #'list pdd--dynamic-context-vars)))
        ,@body)))
 
-;; Backend
+;; Generic
 
 (defclass pdd-http-backend ()
   ((user-agent :initarg :user-agent
@@ -594,6 +594,78 @@ reorder the built-in transformers unless you fully understand the consequences."
           :type (or string function null)))
   "Used to send http request."
   :abstract t)
+
+(cl-defgeneric pdd (url-or-backend &rest args &key
+                                   method
+                                   params
+                                   headers
+                                   data
+                                   init
+                                   peek
+                                   as
+                                   done
+                                   fail
+                                   fine
+                                   sync
+                                   timeout
+                                   max-retry
+                                   cookie-jar
+                                   proxy
+                                   queue
+                                   verbose
+                                   &allow-other-keys)
+  "Send an HTTP request using a specified backend.
+
+This function has two primary calling conventions:
+
+1.  As a generic method for a backend:
+    If URL-OR-BACKEND is a backend instance (an object representing a
+    specific HTTP client implementation), then the remaining ARGS must
+    consist of a single request instance. This allows backend-specific
+    dispatch and handling.
+
+2.  As a direct request function:
+    If URL-OR-BACKEND is a URL string, the function uses the backend
+    specified by the variable `pdd-backend` to send an HTTP request.
+    The request is constructed from the keyword arguments provided in ARGS,
+    as described below:
+
+   :METHOD      - HTTP method (symbol, e.g. `get, `post, `put)
+   :PARAMS      - URL query parameters, accepts:
+                  * String - appended directly to URL
+                  * Alist - converted to key=value&... format
+   :HEADERS     - Request headers, supports formats:
+                  * Regular: (\"Header-Name\" . \"value\")
+                  * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
+                  * Parameterized abbrevs: (bear \"token\")
+   :DATA        - Request body data, accepts:
+                  * String - sent directly
+                  * Alist - converted to formdata or JSON based on Content-Type
+                  * File uploads: ((key filepath))
+                  * Function return a string, it will not be auto converted
+   :INIT        - Function called before the request is fired by backend:
+                  (&optional request)
+   :PEEK        - Function called during new data reception, signature:
+                  (&key headers process request)
+   :AS          - Preprocess results for DONE, accepts:
+                  * Symbol, process with `pdd-string-to-object' and `AS' as type
+                  * Function with signature (&key body headers buffer)
+   :DONE        - Success callback, signature:
+                  (&key body headers code version request)
+   :FAIL        - Failure callback, signature:
+                  (&key error request text code)
+   :FINE        - Final callback (always called), signature:
+                  (&optional request)
+   :SYNC        - Whether to execute synchronously (boolean)
+   :TIMEOUT     - Maximum time in seconds allow to connect
+   :MAX-RETRY   - Number of retry attempts on timeout
+   :COOKIE-JAR  - An object used to auto manage http cookies
+   :PROXY       - Proxy used by current http request (string or function)
+   :QUEUE       - Semaphore object used to limit concurrency (async only)
+   :VERBOSE     - Output more infos like headers when request (bool or function)
+
+Returns response data in sync mode, task object in async mode."
+  (declare (indent 1)))
 
 ;; Task (Promise/A+)
 
@@ -788,9 +860,9 @@ with each receiving the result of the previous operation.
 Supports error handling via the :fail keyword, if present, it must be followed
 by a function that will catch the final task.
 
-NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+NOTICE: variable `pdd-sync' always be nil in the inner context."
   (declare (indent 1))
-  (let* ((pdd-default-sync nil)
+  (let* ((pdd-sync nil)
          (pos (cl-position :fail callbacks))
          (reject (when pos
                    (if (functionp (ignore-errors (nth (1+ pos) callbacks)))
@@ -813,11 +885,11 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
 (defun pdd-all (&rest tasks)
   "Wait for all TASKS to complete and return a new task.
 
-NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+NOTICE: variable `pdd-sync' always be nil in the inner context."
   (pdd-with-new-task
    (if (null tasks)
        (pdd-resolve it nil)
-     (let* ((pdd-default-sync nil)
+     (let* ((pdd-sync nil)
             (tasks (pdd-task--flatten-tasks tasks))
             (results (make-vector (length tasks) nil))
             (remaining (length tasks))
@@ -842,11 +914,11 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
 (defun pdd-any (&rest tasks)
   "Wait for any of TASKS to succeed and return a new task.
 
-NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+NOTICE: variable `pdd-sync' always be nil in the inner context."
   (pdd-with-new-task
    (if (null tasks)
        (pdd-reject it "No tasks provided")
-     (let* ((pdd-default-sync nil)
+     (let* ((pdd-sync nil)
             (tasks (pdd-task--flatten-tasks tasks))
             (errors (make-vector (length tasks) nil))
             (remaining (length tasks))
@@ -870,11 +942,11 @@ NOTICE: variable `pdd-default-sync' always be nil in the inner context."
 (defun pdd-race (&rest tasks)
   "Wait for first settled of the TASKS, return a new task.
 
-NOTICE: variable `pdd-default-sync' always be nil in the inner context."
+NOTICE: variable `pdd-sync' always be nil in the inner context."
   (pdd-with-new-task
    (if (null tasks)
        (pdd-reject it "No tasks provided")
-     (let* ((pdd-default-sync nil)
+     (let* ((pdd-sync nil)
             (tasks (pdd-task--flatten-tasks tasks))
             (has-settled nil))
        (cl-loop for task in tasks
@@ -1382,7 +1454,7 @@ This is implemented with macro expand to `pdd-then' callback."
                                handlers)
                             (t (pdd-reject reason-data)))
                     (error (pdd-reject err)))))))))
-    `(let ((pdd-default-sync nil)) ,(transform-body body))))
+    `(let ((pdd-sync nil)) ,(transform-body body))))
 
 (defmacro pdd-let* (&rest body)
   "A useful wrapper for `pdd-async' and `let*'.
@@ -1661,7 +1733,7 @@ to be called when task is acquired."
    (fine       :initarg :fine        :type (or function null) :initform nil)
    (sync       :initarg :sync)
    (timeout    :initarg :timeout     :type (or number null))
-   (retry      :initarg :retry       :type (or number null))
+   (max-retry  :initarg :max-retry   :type (or number null))
    (proxy      :initarg :proxy       :type (or string list null))
    (queue      :initarg :queue       :type (or pdd-queue null))
    (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null))
@@ -1729,7 +1801,7 @@ to be called when task is acquired."
 
 (cl-defmethod pdd-transform-req-fail ((request pdd-request))
   "Construct the :fail callback handler for REQUEST."
-  (with-slots (url retry fail fine abort-flag task queue backend) request
+  (with-slots (url max-retry fail fine abort-flag task queue backend) request
     (setf fail
           (let ((fail1 (if (slot-boundp request 'fail) fail 'unset))
                 (fail-default pdd-default-error-handler))
@@ -1737,13 +1809,13 @@ to be called when task is acquired."
               (unless (memq abort-flag '(cancel abort))
                 (pdd-log 'fail "%s | %s" err (or fail1 'None))
                 ;; retry
-                (if (and (cl-plusp retry) (funcall pdd-retry-condition err))
+                (if (and (cl-plusp max-retry) (funcall pdd-retry-condition err))
                     (progn
                       (if pdd-debug
-                          (pdd-log 'fail "retrying (remains %d times)..." retry)
+                          (pdd-log 'fail "retrying (remains %d times)..." max-retry)
                         (let ((inhibit-message t))
-                          (message "(%d) retring for %s..." retry (cadr err))))
-                      (cl-decf retry)
+                          (message "(%d) retring for %s..." max-retry (cadr err))))
+                      (cl-decf max-retry)
                       (pdd backend request))
                   ;; really fail
                   (pdd-log 'fail "%s"
@@ -1867,7 +1939,7 @@ to be called when task is acquired."
                        (oref request proxy))
                       ((slot-boundp backend 'proxy)
                        (oref backend proxy))
-                      (t pdd-default-proxy))))
+                      (t pdd-proxy))))
     (when (functionp proxy)
       (setq proxy (pdd-funcall proxy (list request backend))))
     (when (stringp proxy)
@@ -1896,7 +1968,7 @@ to be called when task is acquired."
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'pdd-string-iequal)
-      (push `("User-Agent" . ,(if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-default-user-agent)) headers))
+      (push `("User-Agent" . ,(if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-user-agent)) headers))
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
 
@@ -1917,31 +1989,31 @@ Make sure this is after data and headers being processed."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data timeout retry sync done peek abort-flag buffer backend task queue verbose) request
+  (with-slots (url method params headers data timeout max-retry sync done peek abort-flag buffer backend task queue verbose) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when (and (slot-boundp request 'params) params)
       (setf url (pdd-gen-url-with-params url params)))
     ;; make such keywords can be dynamically bound
     (unless (slot-boundp request 'headers)
-      (setf headers pdd-default-headers))
+      (setf headers pdd-headers))
     (unless (slot-boundp request 'data)
-      (setf data pdd-default-data))
+      (setf data pdd-data))
     (unless (slot-boundp request 'done)
-      (setf done pdd-default-done))
+      (setf done pdd-done))
     (unless (slot-boundp request 'peek)
-      (setf peek pdd-default-peek))
+      (setf peek pdd-peek))
     (unless (slot-boundp request 'timeout)
-      (setf timeout pdd-default-timeout))
-    (unless (slot-boundp request 'retry)
-      (setf retry pdd-default-retry))
+      (setf timeout pdd-timeout))
+    (unless (slot-boundp request 'max-retry)
+      (setf max-retry pdd-max-retry))
     (unless (slot-boundp request 'queue)
       (setf queue pdd-default-queue))
     (unless (slot-boundp request 'verbose)
-      (setf verbose pdd-default-verbose))
+      (setf verbose pdd-verbose))
     (unless (slot-boundp request 'sync)
-      (setf sync (if (eq pdd-default-sync 'unset)
-                     (if done nil t) pdd-default-sync)))
+      (setf sync (if (eq pdd-sync 'unset)
+                     (if done nil t) pdd-sync)))
     (unless (and (slot-boundp request 'method) method)
       (setf method (if data 'post 'get)))
     (unless buffer (setf buffer (current-buffer)))
@@ -2054,93 +2126,15 @@ Make sure this is after data and headers being processed."
     (list :body pdd-resp-body :headers pdd-resp-headers
           :code pdd-resp-status :version pdd-resp-version :request request)))
 
-;; Entrance
+;; Entry
 
-(cl-defgeneric pdd (backend url &rest _args &key
-                            method
-                            params
-                            headers
-                            data
-                            init
-                            peek
-                            as
-                            done
-                            fail
-                            fine
-                            sync
-                            timeout
-                            retry
-                            proxy
-                            queue
-                            cookie-jar
-                            verbose
-                            &allow-other-keys)
-  "Send request using the specified BACKEND.
+(cl-defgeneric pdd-request-transformers (_backend)
+  "Return the request transformers will be used by BACKEND."
+  pdd-default-request-transformers)
 
-This is a generic function with implementations provided by backend classes.
-
-The documentation below is mainly described for the general http backend.
-
-Parameters:
-  BACKEND  - Backend instance
-  URL      - Target URL (string)
-
-Keyword Arguments:
-  :METHOD  - HTTP method (symbol, e.g. `get, `post, `put), defaults to `get
-  :PARAMS  - URL query parameters, accepts:
-             * String - appended directly to URL
-             * Alist - converted to key=value&... format
-  :HEADERS - Request headers, supports formats:
-             * Regular: (\"Header-Name\" . \"value\")
-             * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
-             * Parameterized abbrevs: (bear \"token\")
-  :DATA    - Request body data, accepts:
-             * String - sent directly
-             * Alist - converted to formdata or JSON based on Content-Type
-             * File uploads: ((key filepath))
-             * Function return a string, it will not be auto converted
-  :INIT    - Function called before the request is fired by backend:
-             (&optional request)
-  :PEEK    - Function called during new data reception, signature:
-             (&key headers process request)
-  :AS      - Preprocess results for DONE, accepts:
-             * Symbol, process with `pdd-string-to-object' and `AS' as type
-             * Function with signature (&key body headers buffer)
-  :DONE    - Success callback, signature:
-             (&key body headers code version request)
-  :FAIL    - Failure callback, signature:
-             (&key error request text code)
-  :FINE    - Final callback (always called), signature:
-             (&optional request)
-  :SYNC    - Whether to execute synchronously (boolean)
-  :TIMEOUT - Maximum time in seconds allow to connect
-  :RETRY   - Number of retry attempts on timeout
-  :PROXY   - Proxy used by current http request (string or function)
-  :QUEUE   - Semaphore object used to limit concurrency (async only)
-  :COOKIE-JAR - An object used to auto manage http cookies
-  :VERBOSE - Display extra informations like headers when request, bool/function
-
-Returns:
-  Response data in sync mode, task object in async mode.
-
-Examples:
-  ;; Simple GET request
-  (pdd some-backend \"https://api.example.com\")
-
-  ;; POST JSON data
-  (pdd some-backend \"https://api.example.com/api\"
-    :headers \\='(json)
-    :data \\='((key . \"value\")))
-
-  ;; Multipart request with file upload
-  (pdd some-backend \"https://api.example.com/upload\"
-    :data \\='((file \"path/to/file\")))
-
-  ;; Async request with callbacks
-  (pdd some-backend \"https://api.example.com/data\"
-    :done (lambda (data) (message \"Got: %S\" data))
-    :fail (lambda (err) (message \"Error: %S\" err)))."
-  (declare (indent 1)))
+(cl-defgeneric pdd-response-transformers (_backend)
+  "Return the response transformers will be used by BACKEND."
+  pdd-default-response-transformers)
 
 (cl-defmethod pdd :around ((backend pdd-http-backend) &rest args)
   "The common logics before or after the http request for BACKEND.
@@ -2173,14 +2167,6 @@ ARGS should a request instances or keywords to build the request."
       (error (if request
                  (funcall (oref request fail) err)
                (message "Caught error during pdd:around: %s" err))))))
-
-(cl-defgeneric pdd-request-transformers (_backend)
-  "Return the request transformers will be used by BACKEND."
-  pdd-default-request-transformers)
-
-(cl-defgeneric pdd-response-transformers (_backend)
-  "Return the response transformers will be used by BACKEND."
-  pdd-default-response-transformers)
 
 
 ;;; Implement for url.el
@@ -2565,8 +2551,7 @@ Other supported arguments are the same as the generic `pdd' method."
                  (apply #'pdd-complete-absent-keywords args)))
          (backend (pdd-ensure-default-backend args)))
     (unless (and backend (eieio-object-p backend) (object-of-class-p backend 'pdd-http-backend))
-      (user-error "Make sure `pdd-backend' is available.  eg:\n
-(setq pdd-backend (pdd-url-backend))\n\n\n"))
+      (user-error "Make sure `pdd-backend' is available.  eg:\n(setq pdd-backend (pdd-url-backend))\n\n\n"))
     (apply #'pdd backend args)))
 
 (provide 'pdd)

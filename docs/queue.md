@@ -35,11 +35,11 @@ Then use the created queue object with `:queue`:
 (pdd "https://httpbin.org/ip" :done #'print :queue queue1)
 
 ;; notice, only asynchronous requests can be queued, otherwise :queue will be ignored
-(let ((pdd-default-sync nil))
+(let ((pdd-sync nil))
   (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue2)))
 
 ;; dispatch different requests to different queues
-(let ((pdd-default-sync nil))
+(let ((pdd-sync nil))
   (pdd "https://httpbin.org/ip" :queue queue3)
   (pdd "https://httpbin.org/ip" :queue queue4)
   (pdd "https://httpbin.org/ip")
@@ -97,7 +97,7 @@ A simple benchmark function:
 
 ```emacs-lisp
 (defun who-is-faster-backend (backend concurrent-number total &optional url)
-  (let* ((pdd-default-sync nil) ; make sure it's async request
+  (let* ((pdd-sync nil) ; make sure it's async request
          (beg (current-time))   ; record start time
          (stat-time (lambda () (message "Time used: %.1f" (time-to-seconds (time-since beg)))))
          (pdd-default-queue (pdd-queue :limit concurrent-number :fine stat-time))

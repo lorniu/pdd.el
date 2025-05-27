@@ -1,6 +1,6 @@
 [![MELPA](https://melpa.org/packages/pdd-badge.svg)](https://melpa.org/#/pdd)
 
-# Mordern HTTP library & Async Toolkit for Emacs
+# Modern HTTP library & Async Toolkit for Emacs
 
 This package provides a robust and elegant library for HTTP requests and asynchronous operations in Emacs. It featuring a single, consistent API that works identically across different backends, maximizing code portability and simplifying development.
 
@@ -21,7 +21,7 @@ Table of contents:
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
 - [Integrate `timers` with task and request `(pdd-expire/delay/interval)`](docs/task-timers.md)
 - [Integrate `make-process` with task and request `(pdd-exec)`](docs/task-process.md)
-- [Compare this package with plz.el](#Comparison)  |  [Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
+- (Benchmark) [Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
 
 ## Installation
 
@@ -106,9 +106,9 @@ More options of the `pdd` function:
   :fine (lambda () (message "kindness, please")))
 
 ;; Use :timeout to set how long one request can wait to connect (seconds)
-;; Use :retry to set times auto resend the request if timeout
+;; Use :max-retry to set times auto resend the request if timeout
 
-(pdd "https://httpbin.org/ip" :done #'print :timeout 0.9 :retry 5)
+(pdd "https://httpbin.org/ip" :done #'print :timeout 0.9 :max-retry 5)
 
 ;; Also, you can see, if the content-type is json, :data will be auto decoded,
 ;; If the response content-type is json, result string is auto converted to elisp object.
@@ -148,8 +148,7 @@ More options of the `pdd` function:
 
 (pdd "https://httpbin.org/image/jpeg"
   :done (lambda (r) ; async, non-block
-          (with-temp-file "~/aaa.jpeg"
-            (insert r))))
+          (with-temp-file "~/aaa.jpeg" (insert r))))
 ```
 
 DONE and other callbacks have variadic arguments, use according their signatures:
@@ -218,7 +217,7 @@ Of course, there are tricks that can make things easier:
 (pdd #'print "https://httpbin.org/anything")
 (pdd 'delete "https://httpbin.org/delete")
 (pdd '((key . value)) "https://httpbin.org/anything" #'print)
-(pdd #'print 'put "https://httpbin.org/anything" '((key . value)) :timeout 2 :retry 3)
+(pdd #'print 'put "https://httpbin.org/anything" '((key . value)) :timeout 2 :max-retry 3)
 (pdd #'insert 'post "https://httpbin.org/anything" :as #'identity)
 
 ;; Another sugar is, you can simply code of :headers in the help of abbrevs.
@@ -236,21 +235,23 @@ Of course, there are tricks that can make things easier:
 (pdd 'print "https://httpbin.org/anything"
   :headers `(json ua-emacs (bear ,token) ("Accept" . "*/*")))
 
-;; The data/headers/done/peek/timeout/retry can be dynamically bound.
+;; The data/headers/done/peek/timeout/max-retry can be dynamically bound.
 
-(let ((pdd-default-sync nil)
-      (pdd-default-retry 3)
-      (pdd-default-headers `(json (bear ,token))))
-  (pdd "https://httpbin.org/ip")            ; use default headers/data if exists
-  (pdd "https://httpbin.org/uuid" :retry 1) ; override the default variables
+(let ((pdd-sync nil)
+      (pdd-max-retry 3)
+      (pdd-headers `(json (bear ,token))))
+  (pdd "https://httpbin.org/ip")                ; use default headers/data if exists
+  (pdd "https://httpbin.org/uuid" :max-retry 1) ; override the default variables
   (pdd "https://httpbin.org/user-agent" :headers nil))
 
 ;; Therefore, defining a function for request with special settings is a good practice:
 
 (defun my-request (&rest args)
-  (let ((pdd-default-sync nil) (pdd-default-retry 3) (pdd-default-timeout 15) ;; ..
-        (pdd-default-headers `(json (bear ,token)))
-        (pdd-default-done (lambda (r) (message "> %s" r))))
+  (let ((pdd-sync nil)
+        (pdd-max-retry 3)
+        (pdd-timeout 15)
+        (pdd-headers `(json (bear ,token)))
+        (pdd-done (lambda (r) (message "> %s" r))))
     (apply #'pdd args)))
 (my-request "https://httpbin.org/ip")
 ```
@@ -308,18 +309,32 @@ Use `:verbose` to inspect the request/response headers:
 
 Download file with progress bar display:
 ``` emacs-lisp
-;; Replace the url with a big file to have a try
-;; you can abort the download by deleting the returned process
+;; Use `:peek' and `progress-reporter' to display progress
 
-(let ((reporter (make-progress-reporter "Downloading...")))
-  (pdd "https://httpbin.org/image/jpeg"
+(let ((reporter (progress-reporter-make "Downloading")))
+  (pdd "https://cachefly.cachefly.net/100mb.test"
     :peek (lambda (headers)
             (let* ((total (string-to-number (alist-get 'content-length headers)))
                    (percent (format "%.1f%%" (/ (* 100.0 (buffer-size)) total))))
               (progress-reporter-update reporter percent)))
     :done (lambda (raw)
-            (with-temp-file "~/aaa.jpeg" (insert raw))
-            (progress-reporter-done reporter))))
+            (let ((coding-system-for-write 'no-conversion))
+              (write-region raw nil "~/aaa.bin")))))
+
+;; Or separate the progress reporter logic out:
+
+(defun pdd-with-progress-reporter (&rest args)
+  (let* ((reporter (progress-reporter-make "Downloading"))
+         (pdd-peek (lambda (headers)
+                     (let* ((total (string-to-number (alist-get 'content-length headers)))
+                            (percent (format "%.1f%%" (/ (* 100.0 (buffer-size)) total))))
+                       (progress-reporter-update reporter percent)))))
+    (apply #'pdd args)))
+
+(pdd-with-progress-reporter "https://cachefly.cachefly.net/100mb.test"
+  (lambda (raw)
+    (let ((coding-system-for-write 'no-conversion))
+      (write-region raw nil "~/aaa.bin"))))
 ```
 
 Scrape all images from a webpage:
@@ -345,13 +360,13 @@ Scrape all images from a webpage:
       (make-directory dir t)
       (dolist (url urls)
         (pdd url
-          (lambda (r)
-            (let ((coding-system-for-write 'no-conversion)
-                  (loc (expand-file-name
-                        (decode-coding-string
-                         (url-unhex-string (file-name-nondirectory url)) 'utf-8)
-                        dir)))
-              (write-region r nil loc))))))))
+          (lambda (raw)
+            (let ((coding-system-for-write 'no-conversion))
+              (write-region raw nil
+                            (expand-file-name
+                             (decode-coding-string
+                              (url-unhex-string (file-name-nondirectory url)) 'utf-8)
+                             dir)))))))))
 
 (my-scrape-site-images
  "https://commons.wikimedia.org/wiki/Commons:Picture_of_the_Year/2022/R2/Gallery"
@@ -361,96 +376,77 @@ Scrape all images from a webpage:
 ## API
 
 ``` emacs-lisp
-(cl-defgeneric pdd (backend url &rest _args &key
-                            method
-                            params
-                            headers
-                            data
-                            init
-                            peek
-                            as
-                            done
-                            fail
-                            fine
-                            sync
-                            timeout
-                            retry
-                            proxy
-                            queue
-                            cookie-jar
-                            verbose
-                            &allow-other-keys)
-  "Send HTTP request using the specified BACKEND.
+(cl-defgeneric pdd (url-or-backend &rest args &key
+                                   method
+                                   params
+                                   headers
+                                   data
+                                   init
+                                   peek
+                                   as
+                                   done
+                                   fail
+                                   fine
+                                   sync
+                                   timeout
+                                   max-retry
+                                   proxy
+                                   queue
+                                   cookie-jar
+                                   verbose
+                                   &allow-other-keys)
+  "Send an HTTP request using a specified backend.
 
-This is a generic function with implementations provided by backend classes.
+This function has two primary calling conventions:
 
-Parameters:
-  BACKEND  - HTTP backend instance (subclass of `pdd-http-backend')
-  URL      - Target URL (string)
+1.  As a generic method for a backend:
+    If URL-OR-BACKEND is a backend instance (an object representing a
+    specific HTTP client implementation), then the remaining ARGS must
+    consist of a single request instance. This allows backend-specific
+    dispatch and handling.
 
-Keyword Arguments:
-  :METHOD  - HTTP method (symbol, e.g. `get, `post, `put), defaults to `get
-  :PARAMS  - URL query parameters, accepts:
-             * String - appended directly to URL
-             * Alist - converted to key=value&... format
-  :HEADERS - Request headers, supports formats:
-             * Regular: ("Header-Name" . "value")
-             * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
-             * Parameterized abbrevs: (bear "token")
-  :DATA    - Request body data, accepts:
-             * String - sent directly
-             * Alist - converted to formdata or JSON based on Content-Type
-             * File uploads: ((key filepath))
-             * Function return a string, it will not be auto converted
-  :INIT    - Function called before the request is fired by backend:
-             (&optional request)
-  :PEEK    - Function called during new data reception, signature:
-             (&key headers process request)
-  :AS      - Preprocess results for DONE, accepts:
-             * Symbol, process with `pdd-string-to-object' and `AS' as type
-             * Function with signature (&key body headers buffer)
-  :DONE    - Success callback, signature:
-             (&key body headers code version request)
-  :FAIL    - Failure callback, signature:
-             (&key error request text code)
-  :FINE    - Final callback (always called), signature:
-             (&optional request)
-  :SYNC    - Whether to execute synchronously (boolean)
-  :TIMEOUT - Maximum time in seconds allow to connect
-  :RETRY   - Number of retry attempts on timeout
-  :PROXY   - Proxy used by current http request (string or function)
-  :QUEUE   - Semaphore object used to limit concurrency (async only)
-  :COOKIE-JAR - An object used to manage http cookies
-  :VERBOSE - Display extra informations like headers when request, boolean/function
+2.  As a direct request function:
+    If URL-OR-BACKEND is a URL string, the function uses the backend
+    specified by the variable `pdd-backend` to send an HTTP request.
+    The request is constructed from the keyword arguments provided in ARGS,
+    as described below:
 
-Returns:
-  Response data in sync mode, task object in async mode.)
+   :METHOD      - HTTP method (symbol, e.g. `get, `post, `put)
+   :PARAMS      - URL query parameters, accepts:
+                  * String - appended directly to URL
+                  * Alist - converted to key=value&... format
+   :HEADERS     - Request headers, supports formats:
+                  * Regular: (\"Header-Name\" . \"value\")
+                  * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
+                  * Parameterized abbrevs: (bear \"token\")
+   :DATA        - Request body data, accepts:
+                  * String - sent directly
+                  * Alist - converted to formdata or JSON based on Content-Type
+                  * File uploads: ((key filepath))
+                  * Function return a string, it will not be auto converted
+   :INIT        - Function called before the request is fired by backend:
+                  (&optional request)
+   :PEEK        - Function called during new data reception, signature:
+                  (&key headers process request)
+   :AS          - Preprocess results for DONE, accepts:
+                  * Symbol, process with `pdd-string-to-object' and `AS' as type
+                  * Function with signature (&key body headers buffer)
+   :DONE        - Success callback, signature:
+                  (&key body headers code version request)
+   :FAIL        - Failure callback, signature:
+                  (&key error request text code)
+   :FINE        - Final callback (always called), signature:
+                  (&optional request)
+   :SYNC        - Whether to execute synchronously (boolean)
+   :TIMEOUT     - Maximum time in seconds allow to connect
+   :MAX-RETRY   - Number of retry attempts on timeout
+   :COOKIE-JAR  - An object used to auto manage http cookies
+   :PROXY       - Proxy used by current http request (string or function)
+   :QUEUE       - Semaphore object used to limit concurrency (async only)
+   :VERBOSE     - Output more infos like headers when request (bool or function)
+
+Returns response data in sync mode, task object in async mode.")
 ```
-
-## Comparison
-
-| Feature                     | pdd.el                           | plz.el                  |
-|-----------------------------|----------------------------------|-------------------------|
-| **Backend Support**         | Multiple (url.el + curl via plz) | curl only               |
-| **Fallback Mechanism**      | ✅ Automatic fallback to url.el  | ❌ None (requires curl) |
-| **Multipart Uploads**       | ✅ Support                       | ❌ No                   |
-| **Encoding Handling**       | ✅ Auto detection and decoding   | ❌ Manual decode        |
-| **Type Conversion**         | ✅ Auto conversion               | ❌️ Manual convert       |
-| **Retry Logic**             | ✅ Configurable                  | ❌ None                 |
-| **Req/Resp Interceptors**   | ✅ Support                       | ❌ None                 |
-| **Proxy support**           | ✅ Dynamic and easy              | ⚠️ Manual               |
-| **Auto Cookies manage**     | ✅ Support with cookie-jar       | ❌ No                   |
-| **Promise integrated**      | ✅ Support                       | ❌ No                   |
-| **Async/Await support**     | ✅ Support                       | ❌ No                   |
-| **Header Abbreviations**    | ✅ Yes (e.g. `'(json bear)`)     | ❌ No                   |
-| **Variadic Callbacks**      | ✅ Yes, make code cleaner        | ❌ No                   |
-| **Streaming Support**       | ✅ Full                          | ✅ Full                 |
-| **Error Handling**          | ✅ Robust                        | ✅ Robust               |
-| **Customization**           | ✅ Extensive                     | ⚠️ Limited              |
-| **Dependencies**            | None (url.el built-in)           | Requires curl binary    |
-
-I used to think that `plz` was much faster than `url.el`. But after testing ([Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)), I found out that I am completely wrong.
-In various situations, whether it's single concurrency or multiple concurrency, `plz` is at least 3 times as slow as `url.el`.
 
 ## Miscellaneous
 
