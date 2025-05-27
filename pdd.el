@@ -1493,20 +1493,27 @@ Like `pdd-async' but wrap BODY in `let*' form."
            (with-slots (cookies) jar
              (cl-loop
               for (cookie-domain . items) in cookies
-              when (string-match-p (concat "\\.?" (regexp-quote domain) "$") cookie-domain)
+              when (or (and (string-prefix-p "." cookie-domain)
+                            (let ((effective-domain (substring cookie-domain 1)))
+                              (or (string= domain effective-domain)
+                                  (string-suffix-p (concat "." effective-domain) domain))))
+                       (and (not (string-prefix-p "." cookie-domain))
+                            (string= domain cookie-domain)))
               append (cl-loop
                       for cookie in items
                       when (and
                             (not (pdd-cookie-expired-p cookie))
                             (or (null path)
                                 (string-prefix-p (or (plist-get cookie :path) "/") path))
-                            (not (and (null secure) (plist-get cookie :secure))))
+                            (or secure (not (plist-get cookie :secure))))
                       collect cookie)))))
 
 (cl-defgeneric pdd-cookie-jar-put (jar domain cookie-list)
   "Add one or multiple cookies from COOKIE-LIST to the JAR for specified DOMAIN."
   (declare (indent 2))
   (:method ((jar pdd-cookie-jar) domain cookie-list)
+           (unless (string-prefix-p "." domain)
+             (setq domain (concat "." domain)))
            (with-slots (cookies) jar
              (dolist (cookie (if (plist-get cookie-list :name) (list cookie-list) cookie-list))
                (let ((items (assoc-string domain cookies)))
