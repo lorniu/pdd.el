@@ -2044,7 +2044,12 @@ Make sure this is after data and headers being processed."
 (cl-defgeneric pdd-make-request (backend &rest _arg)
   "Instance request object for BACKEND."
   (:method ((backend pdd-http-backend) &rest args)
-           (apply #'pdd-request `(:backend ,backend :url ,@args))))
+           (let* ((url (pop args))
+                  (slots (mapcar #'eieio-slot-descriptor-name (eieio-class-slots 'pdd-request)))
+                  (vargs (cl-loop for (k v) on args by #'cddr
+                                  if (memq (intern (substring (symbol-name k) 1)) slots)
+                                  append (list k v))))
+             (apply #'pdd-request `(:backend ,backend :url ,url ,@vargs)))))
 
 ;; Response
 
