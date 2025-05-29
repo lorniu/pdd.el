@@ -415,10 +415,12 @@ This function has two primary calling conventions:
    :PARAMS      - URL query parameters, accepts:
                   * String - appended directly to URL
                   * Alist - converted to key=value&... format
-   :HEADERS     - Request headers, supports formats:
+   :HEADERS     - Request headers, a list, with element supports formats:
                   * Regular: (\"Header-Name\" . \"value\")
                   * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
                   * Parameterized abbrevs: (bear \"token\")
+                  * If the first element of this list, headers is t, then append
+                    with `pdd-headers' as the last headers
    :DATA        - Request body data, accepts:
                   * String - sent directly
                   * Alist - converted to formdata or JSON based on Content-Type

@@ -189,7 +189,6 @@ ALIST format:
 
 Returns the multipart data as a unibyte string."
   (with-temp-buffer
-    (set-buffer-multibyte nil)
     (when alist
       (insert "--" pdd-multipart-boundary "\r\n")
       (cl-loop for (key . value) in alist
@@ -211,6 +210,7 @@ Returns the multipart data as a unibyte string."
                do (insert "\r\n--" pdd-multipart-boundary)
                do (unless is-last (insert "\r\n")))
       (insert "--"))
+    (set-buffer-multibyte nil)
     (buffer-string)))
 
 (defun pdd-extract-http-headers ()
@@ -634,10 +634,12 @@ This function has two primary calling conventions:
    :PARAMS      - URL query parameters, accepts:
                   * String - appended directly to URL
                   * Alist - converted to key=value&... format
-   :HEADERS     - Request headers, supports formats:
+   :HEADERS     - Request headers, a list, with element supports formats:
                   * Regular: (\"Header-Name\" . \"value\")
                   * Abbrev symbols: json, bear (see `pdd-header-rewrite-rules')
                   * Parameterized abbrevs: (bear \"token\")
+                  * If the first element of this list, headers is t, then append
+                    with `pdd-headers' as the last headers
    :DATA        - Request body data, accepts:
                   * String - sent directly
                   * Alist - converted to formdata or JSON based on Content-Type
@@ -1249,10 +1251,10 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
                             (let (lines)
                               (save-excursion
                                 (goto-char (point-min))
-	                            (while (not (eobp))
-	                              (setq lines (cons (buffer-substring-no-properties (line-beginning-position) (line-end-position)) lines))
-	                              (forward-line 1))
-	                            (nreverse lines)))))
+                                (while (not (eobp))
+                                  (setq lines (cons (buffer-substring-no-properties (line-beginning-position) (line-end-position)) lines))
+                                  (forward-line 1))
+                                (nreverse lines)))))
               (sentinel-fn (lambda (p event)
                              (with-current-buffer (process-buffer p)
                                (pdd-log 'cmd "event: %s" event)
@@ -1873,27 +1875,28 @@ to be called when task is acquired."
 (cl-defmethod pdd-transform-req-headers ((request pdd-request))
   "Transform headers with stringfy and abbrev replacement in REQUEST."
   (with-slots (headers) request
+    ;; append case
+    (when (eq (car headers) t)
+      (setf headers (append (cdr headers) pdd-headers)))
+    ;; apply rewrite rules
     (setf headers
-          (cl-loop
-           with stringfy = (lambda (p) (cons (format "%s" (car p))
-                                             (format "%s" (cdr p))))
-           for item in headers for v = nil
-           if (null item) do (ignore)
-           if (setq v (and (symbolp item)
-                           (pdd-with-common-cache (list 'rewrite item)
-                             (alist-get item pdd-header-rewrite-rules))))
-           collect (funcall stringfy v)
-           else if (setq v (and (consp item)
-                                (symbolp (car item))
-                                (or (null (cdr item)) (car-safe (cdr item)))
-                                (pdd-with-common-cache (list 'rewrite item)
-                                  (alist-get (car item) pdd-header-rewrite-rules))))
-           collect (funcall stringfy (cons (car v)
-                                           (if (cdr item)
-                                               (apply #'format (cdr v) (cdr item))
-                                             (cdr v))))
-           else if (cdr item)
-           collect (funcall stringfy item)))))
+          (cl-loop for item in headers
+                   do (setq item (ensure-list item))
+                   if (and (symbolp (car item))
+                           (or (null (cdr item)) (car-safe (cdr item))))
+                   collect (when-let* ((rule (pdd-with-common-cache (list 'rewrite item)
+                                               (alist-get (car item) pdd-header-rewrite-rules))))
+                             (cons (car rule) (apply #'format (cdr rule) (cdr item))))
+                   else collect item))
+    ;; normalize and collect items
+    (setf headers
+          (cl-loop with last-headers = nil
+                   for item in headers
+                   for k = (string-to-unibyte (capitalize (format "%s" (car item))))
+                   for v = (string-to-unibyte (format "%s" (cdr item)))
+                   unless (or (null item) (assoc k last-headers))
+                   do (push (cons k v) last-headers)
+                   finally return (nreverse last-headers)))))
 
 (cl-defmethod pdd-transform-req-cookies ((request pdd-request))
   "Add cookies from cookie jar to REQUEST headers."
@@ -1975,7 +1978,7 @@ to be called when task is acquired."
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'pdd-string-iequal)
-      (push `("User-Agent" . ,(if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-user-agent)) headers))
+      (push `("User-Agent" . ,(string-to-unibyte (if (slot-boundp backend 'user-agent) (oref backend user-agent) pdd-user-agent))) headers))
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
 
@@ -2381,7 +2384,7 @@ ARGS should a request instances or keywords to build the request."
                 (when-let* ((proc (get-buffer-process init-buffer)))
                   (when (memq (process-status proc) '(closed exit signal failed))
                     (unless final-buffer
-		              (throw 'pdd-done 'exception))))
+                      (throw 'pdd-done 'exception))))
                 (with-local-quit
                   (while (and (process-live-p init-process) (not abort-flag) (not final-buffer))
                     (accept-process-output nil 0.05)))
