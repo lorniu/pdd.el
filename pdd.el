@@ -548,6 +548,8 @@ reorder the built-in transformers unless you fully understand the consequences."
 (defvar pdd-data nil)
 (defvar pdd-peek nil)
 (defvar pdd-done nil)
+(defvar pdd-fail nil)
+(defvar pdd-fine nil)
 
 (eval-when-compile
   (defvar pdd--dynamic-context-vars
@@ -567,7 +569,9 @@ reorder the built-in transformers unless you fully understand the consequences."
       pdd-headers
       pdd-data
       pdd-peek
-      pdd-done)
+      pdd-done
+      pdd-fail
+      pdd-fine)
     "List of dynamic variables whose bindings should penetrate async callbacks."))
 
 (defun pdd--capture-dynamic-context ()
@@ -1999,7 +2003,7 @@ Make sure this is after data and headers being processed."
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "req:init...")
-  (with-slots (url method params headers data timeout max-retry sync done peek abort-flag buffer backend task queue verbose) request
+  (with-slots (url method params headers data peek done fail fine timeout max-retry sync abort-flag buffer backend task queue verbose) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
     (when (and (slot-boundp request 'params) params)
@@ -2009,10 +2013,14 @@ Make sure this is after data and headers being processed."
       (setf headers pdd-headers))
     (unless (slot-boundp request 'data)
       (setf data pdd-data))
-    (unless (slot-boundp request 'done)
-      (setf done pdd-done))
     (unless (slot-boundp request 'peek)
       (setf peek pdd-peek))
+    (unless (slot-boundp request 'done)
+      (setf done pdd-done))
+    (unless (slot-boundp request 'fail)
+      (setf fail pdd-fail))
+    (unless (slot-boundp request 'fine)
+      (setf fine pdd-fine))
     (unless (slot-boundp request 'timeout)
       (setf timeout pdd-timeout))
     (unless (slot-boundp request 'max-retry)
