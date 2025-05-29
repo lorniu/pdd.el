@@ -716,19 +716,22 @@ Provide a `:signal function' anywhere in BODY to set signal function for task."
 
 (defun pdd-then (task &optional on-fulfilled on-rejected)
   "Register callbacks to be called when the TASK is resolved or rejected.
-ON-FULFILLED ON-REJECTED are the callbacks for success and fail."
+ON-FULFILLED ON-REJECTED are the callbacks for success and fail.
+
+When task is not a task instance, pass it to ON-FULFILLED directly, then
+this is just like funcall with arguments reversed."
   (declare (indent 1))
-  (unless (pdd-task-p task)
-    (user-error "Task must be a `pdd-task' instance"))
-  (pdd-with-new-task
-   (let ((context (pdd--capture-dynamic-context)))
-     (pdd-log 'task "    then | %s" (aref task 3))
-     (when (and on-rejected (functionp on-rejected))
-       (aset task 6 t)) ; mark as handled by downstream
-     (pcase (aref task 1)
-       ('pending (push (list on-fulfilled on-rejected it context) (aref task 4)))
-       (_ (pdd-task--execute task (list on-fulfilled on-rejected it context))))
-     (pdd-log 'task "        -> %s" (aref task 3) "        -> %s" it))))
+  (if (pdd-task-p task)
+      (pdd-with-new-task
+       (let ((context (pdd--capture-dynamic-context)))
+         (pdd-log 'task "    then | %s" (aref task 3))
+         (when (and on-rejected (functionp on-rejected))
+           (aset task 6 t)) ; mark as handled by downstream
+         (pcase (aref task 1)
+           ('pending (push (list on-fulfilled on-rejected it context) (aref task 4)))
+           (_ (pdd-task--execute task (list on-fulfilled on-rejected it context))))
+         (pdd-log 'task "        -> %s" (aref task 3) "        -> %s" it)))
+    (if on-fulfilled (funcall on-fulfilled task) task)))
 
 (defun pdd-resolve (&rest args)
   "Resolve an existed task or create a new resolved task.
