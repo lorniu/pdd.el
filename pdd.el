@@ -6,7 +6,7 @@
 ;; URL: https://github.com/lorniu/pdd.el
 ;; License: GPL-3.0-or-later
 ;; Package-Requires: ((emacs "28.1"))
-;; Version: 0.1
+;; Version: 0.2.0
 
 ;; This file is not part of GNU Emacs.
 
