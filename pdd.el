@@ -414,11 +414,11 @@ Return a plist containing all cookie attributes."
   "Return text description of the HTTP-STATUS-CODE."
   (caddr (assoc http-status-code url-http-codes)))
 
-(cl-defmacro pdd-with-record ((&rest vars) record &rest body)
-  "Destructuring bind VARS for RECORD using by BODY."
+(cl-defmacro pdd-with-vector ((&rest vars) vector &rest body)
+  "Destructuring bind VARS for VECTOR using by BODY."
   (declare (indent 2) (debug ((&rest symbolp) form body)))
   (let ((var (gensym)))
-    `(let ((,var ,record))
+    `(let ((,var ,vector))
        (cl-symbol-macrolet
            ,(cl-loop for i in vars for n from 1
                      unless (eq i '_)
@@ -832,11 +832,11 @@ VALUE of status:
 Each callback with function signature:
     (on-fulfilled on-rejected child-task captured-context)."
   ;;              0        1   2   3   4   5   6   7
-  (record 'pdd-task 'pending nil nil '() nil nil nil))
+  (vector 'pdd-task 'pending nil nil '() nil nil nil))
 
 (defun pdd-task-p (obj)
   "Judge if OBJ is a `pdd-task'."
-  (eq (type-of obj) 'pdd-task))
+  (and (vectorp obj) (eq (aref obj 0) 'pdd-task)))
 
 (defun pdd-task-ensure (value)
   "Ensure VALUE is a task instance."
@@ -922,7 +922,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
 
 (defun pdd-signal (task &optional signal)
   "Send a SIGNAL to the pending TASK to run the signal function if exists."
-  (pdd-with-record (status _ _ callbacks signal-fn) task
+  (pdd-with-vector (status _ _ callbacks signal-fn) task
     (when (eq status 'pending)
       (pdd-log 'task "  signal | %s, signal: %s" task signal)
       (if (functionp signal)
@@ -932,7 +932,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
 
 (defun pdd-task--settle (task status v)
   "Settle TASK to STATUS with V is value or reason."
-  (pdd-with-record (s values reason callbacks _ reject-handled-p inhibit-default-rejection-p) task
+  (pdd-with-vector (s values reason callbacks _ reject-handled-p inhibit-default-rejection-p) task
     (unless (eq s 'pending)
       (user-error "Cannot settle non-pending task"))
     (unless (memq status '(fulfilled rejected))
@@ -962,7 +962,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
   (when callback
     (cl-destructuring-bind (on-fulfilled on-rejected child-task context) callback
       (condition-case err1
-          (pdd-with-record (status values reason) task
+          (pdd-with-vector (status values reason) task
             (pcase status
               ('fulfilled
                (if (functionp on-fulfilled)
