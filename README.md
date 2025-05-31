@@ -363,7 +363,7 @@ Scrape all images from a webpage:
                          (dom-by-tag dom 'img)))
            (pdd-base-url (let ((parsed (url-generic-parse-url url)))
                            (format "%s://%s" (url-type parsed) (url-host parsed))))
-           (pdd-default-queue (pdd-queue :limit (or concurrency-limit 10)
+           (pdd-active-queue (pdd-queue :limit (or concurrency-limit 10)
                                          :fine (lambda () (message "Done.")))))
       (make-directory dir t)
       (dolist (url urls)

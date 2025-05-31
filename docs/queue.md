@@ -47,19 +47,19 @@ Then use the created queue object with `:queue`:
   (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue7)))
 ```
 
-Use `pdd-default-queue` to make things easier:
+Use `pdd-active-queue` to make things easier:
 ```emacs-lisp
 ;; set global value for all `pdd's without :queue specified
-(setq pdd-default-queue (pdd-queue :limit 3))
+(setq pdd-active-queue (pdd-queue :limit 3))
 (pdd "https://httpbin.org/ip" :done #'print) ; this will be auto managed by default queue
 
 ;; but global value is not recommended, dynamic binding is preferred!
-(let ((pdd-default-queue (pdd-queue :limit 1)))
+(let ((pdd-active-queue (pdd-queue :limit 1)))
   (dotimes (i 20) (pdd "https://httpbin.org/ip" :queue queue1)) ; these use queue1
   (dotimes (i 20) (pdd "https://httpbin.org/ip"))) ; these use the default queue (request one by one)
 
 ;; there is a `:fine' callback, will be triggered every time when queue is empty
-(let ((pdd-default-queue (pdd-queue :limit 1 :fine (lambda () (message "Done.")))))
+(let ((pdd-active-queue (pdd-queue :limit 1 :fine (lambda () (message "Done.")))))
   (dotimes (i 20) (pdd "https://httpbin.org/ip")))
 ```
 
@@ -81,7 +81,7 @@ The `limit/rate` can be dynamical changed:
 
 ```emacs-lisp
 (let* ((begin (current-time))
-       (pdd-default-queue (pdd-queue
+       (pdd-active-queue (pdd-queue
                            :rate 2.7 ; 50 / 20 = 2.5
                            :fine (lambda ()
                                    (message "Elapsed %d seconds"
@@ -100,7 +100,7 @@ A simple benchmark function:
   (let* ((pdd-sync nil) ; make sure it's async request
          (beg (current-time))   ; record start time
          (stat-time (lambda () (message "Time used: %.1f" (time-to-seconds (time-since beg)))))
-         (pdd-default-queue (pdd-queue :limit concurrent-number :fine stat-time))
+         (pdd-active-queue (pdd-queue :limit concurrent-number :fine stat-time))
          (pdd-backend (pcase backend ('url (pdd-url-backend)) ('plz (pdd-curl-backend)))))
     (dotimes (i total)
       (pdd (or url "https://httpbin.org/ip")

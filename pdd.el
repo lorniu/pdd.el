@@ -567,7 +567,7 @@ Usage Examples:
 They will be replaced when transforming request."
   :type 'sexp)
 
-(defvar pdd-default-cookie-jar nil
+(defvar pdd-active-cookie-jar nil
   "Default cookie jar used when not specified in requests.
 
 The value can be either:
@@ -577,7 +577,7 @@ The value can be either:
 This variable is used as a fallback when no cookie jar is explicitly
 provided in individual requests.")
 
-(defvar pdd-default-queue nil
+(defvar pdd-active-queue nil
   "Default request queue used by asynchronous `pdd' calls.
 
 The value can be either:
@@ -776,10 +776,10 @@ Returns response data in sync mode, task object in async mode."
       pdd-timeout
       pdd-max-retry
       pdd-verbose
-      pdd-default-cookie-jar
+      pdd-active-cookie-jar
       pdd-active-cacher
       pdd-shared-cache-storage
-      pdd-default-queue
+      pdd-active-queue
       pdd-default-error-handler
       pdd-headers
       pdd-data
@@ -1845,7 +1845,7 @@ When NOT-PERSIST is non-nil, changes are not saved to persistent storage.
 If JAR is nil, operates on the default cookie jar."
   (:method ((jar pdd-cookie-jar) &optional domain not-persist)
            (with-slots (cookies) jar
-             (when-let* ((jar (or jar pdd-default-cookie-jar)))
+             (when-let* ((jar (or jar pdd-active-cookie-jar)))
                (when cookies
                  (if (stringp domain)
                      (setf cookies (cl-remove-if
@@ -1858,8 +1858,8 @@ If JAR is nil, operates on the default cookie jar."
                                 when fresh collect (cons domain fresh)))
                  (unless not-persist (pdd-cookie-jar-persist jar)))
                jar)))
-  (unless (or jar pdd-default-cookie-jar)
-    (cl-call-next-method (or jar pdd-default-cookie-jar) domain not-persist)))
+  (unless (or jar pdd-active-cookie-jar)
+    (cl-call-next-method (or jar pdd-active-cookie-jar) domain not-persist)))
 
 (cl-defmethod initialize-instance :after ((jar pdd-cookie-jar) &rest _)
   "Load or persist cookies if necessary."
@@ -2039,7 +2039,7 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod pdd-transform-req-cookies ((request pdd-request))
   "Add cookies from cookie jar to REQUEST headers."
   (with-slots (headers url cookie-jar) request
-    (let ((jar (if (slot-boundp request 'cookie-jar) cookie-jar pdd-default-cookie-jar)))
+    (let ((jar (if (slot-boundp request 'cookie-jar) cookie-jar pdd-active-cookie-jar)))
       (when (functionp jar)
         (setq jar (pdd-funcall jar (list request))))
       (when (setf cookie-jar jar)
@@ -2182,7 +2182,7 @@ Make sure this is after data and headers being processed."
     (unless (slot-boundp request 'cache)
       (setf cache pdd-active-cacher))
     (unless (slot-boundp request 'queue)
-      (setf queue pdd-default-queue))
+      (setf queue pdd-active-queue))
     (unless (slot-boundp request 'verbose)
       (setf verbose pdd-verbose))
     (unless (slot-boundp request 'sync)

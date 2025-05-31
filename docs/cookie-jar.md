@@ -48,10 +48,10 @@ Use cookie-jar in request:
 (pdd "https://bing.com" :done #'ignore :cookie-jar cj-1 :verbose t)
 ```
 
-Use `pdd-default-cookie-jar` to make things easier:
+Use `pdd-active-cookie-jar` to make things easier:
 
 ```emacs-lisp
-(setq pdd-default-cookie-jar (pdd-cookie-jar :persist "~/cookies.txt"))
+(setq pdd-active-cookie-jar (pdd-cookie-jar :persist "~/cookies.txt"))
 
 ;; All requests without cookie-jar bound will use the default cookie-jar if possible
 
@@ -62,13 +62,13 @@ Use `pdd-default-cookie-jar` to make things easier:
 But global default cookie-jar is not recommended, try dynamic binding:
 
 ```emacs-lisp
-(let ((pdd-default-cookie-jar (pdd-cookie-jar :persist "~/cookies-aaa.text")))
+(let ((pdd-active-cookie-jar (pdd-cookie-jar :persist "~/cookies-aaa.text")))
   (pdd "https://example.com/profile"))
 
-(let ((pdd-default-cookie-jar (pdd-cookie-jar :persist "~/cookies-bbb.text")))
+(let ((pdd-active-cookie-jar (pdd-cookie-jar :persist "~/cookies-bbb.text")))
   (pdd "https://example.com/profile"))
 
-(let ((pdd-default-cookie-jar nil)) ; force disable cookies
+(let ((pdd-active-cookie-jar nil)) ; force disable cookies
   (pdd "https://example.com/profile"))
 
 ;; It's better to wrap the binding in your own request function
@@ -76,7 +76,7 @@ But global default cookie-jar is not recommended, try dynamic binding:
 (defvar my-cookie-jar (pdd-cookie-jar :persist "~/cookies.text"))
 
 (defun my-request (&rest args)
-  (let ((pdd-default-cookie-jar my-cookie-jar))
+  (let ((pdd-active-cookie-jar my-cookie-jar))
     (apply #'pdd args)))
 
 (my-request "https://example.com/profile"
@@ -89,7 +89,7 @@ You can use a function instead of instance to dynamic dispatch different cookie-
 (defvar jar-aaa (pdd-cookie-jar))
 (defvar jar-bbb (pdd-cookie-jar))
 
-(setq pdd-default-cookie-jar
+(setq pdd-active-cookie-jar
       (lambda (request)
         (with-slots (url) request
           (cond ((string-match-p "httpbin.org" url)
