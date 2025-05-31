@@ -1,0 +1,9 @@
+Version 0.2:
+
+  - Add Promise/A+ support
+  - Integrate process/timer
+  - Add features such as cookie-jar/queue and so on
+
+Version 0.1:
+
+  - Basic functions
