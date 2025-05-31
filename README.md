@@ -17,11 +17,13 @@ Why this name?
 
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
-- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md) | [Control concurrency with `:queue`](docs/queue.md)
+- [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md)
+- [Improve request user experience with `:cache`](docs/cacher.md)
+- [Control concurrency with `:queue`](docs/queue.md)
 - [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
 - [Integrate `timers` with task and request `(pdd-expire/delay/interval)`](docs/task-timers.md)
 - [Integrate `make-process` with task and request `(pdd-exec)`](docs/task-process.md)
-- (Benchmark) [Who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
+- [Compare: who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
 
 ## Installation
 
@@ -299,6 +301,12 @@ Cookies auto management with `cookie-jar` ([more](docs/cookie-jar.md)):
 (pdd "https://httpbin.org/ip" :cookie-jar cookie-jar-1)
 ```
 
+Use `:cache` to enable cache support for current request ([more](docs/cacher.md)):
+```emacs-lisp
+(pdd "https://httpbin.org/ip" :cache 5)
+(pdd "https://httpbin.org/ip" :cache (pdd-cacher :ttl 5 :keys '(url method) :storage 'xxx))
+```
+
 Use `:verbose` to inspect the request/response headers:
 ```emacs-lisp
 (pdd "https://httpbin.org/ip" :verbose t)        ; show in message buffer
@@ -391,6 +399,7 @@ Scrape all images from a webpage:
                                    timeout
                                    max-retry
                                    proxy
+                                   cache
                                    queue
                                    cookie-jar
                                    verbose
@@ -444,6 +453,7 @@ This function has two primary calling conventions:
    :MAX-RETRY   - Number of retry attempts on timeout
    :COOKIE-JAR  - An object used to auto manage http cookies
    :PROXY       - Proxy used by current http request (string or function)
+   :CACHE       - Cache strategy for the request
    :QUEUE       - Semaphore object used to limit concurrency (async only)
    :VERBOSE     - Output more infos like headers when request (bool or function)
 
