@@ -215,22 +215,22 @@ Otherwise, clear only the item."
 
 (defvar pdd-active-cacher nil)
 
-(defvar pdd-shared-cache-storage 'pdd--shared-request-storage)
+(defvar pdd-shared-cache-storage 'pdd-shared-request-storage)
 
-(defconst pdd--shared-common-storage (make-hash-table :test 'equal))
+(defconst pdd-shared-common-storage (make-hash-table :test 'equal))
 
-(defconst pdd--shared-request-storage (make-hash-table :test 'equal))
+(defconst pdd-shared-request-storage (make-hash-table :test 'equal))
 
 (defmacro pdd-with-common-cacher (key &rest body)
   "Execute BODY and cache its result under KEY."
   (declare (indent 1))
   (let ((keysmb (gensym)) (valsmb (gensym)) (cache (gensym)))
     `(let* ((,keysmb ,key)
-            (,cache (gethash ,keysmb pdd--shared-common-storage 'no-x-cache)))
+            (,cache (gethash ,keysmb pdd-shared-common-storage 'no-x-cache)))
        (if (not (eq ,cache 'no-x-cache))
            ,cache
          (let ((,valsmb (progn ,@body)))
-           (puthash ,keysmb ,valsmb pdd--shared-common-storage)
+           (puthash ,keysmb ,valsmb pdd-shared-common-storage)
            ,valsmb)))))
 
 ;; Utils
@@ -332,8 +332,8 @@ Try to unhex the second part when URL-DECODE is not nil."
 (defun pdd-generic-parse-url (url)
   "Return an URL-struct of the parts of URL with cache support."
   (pdd-with-common-cacher (list 'url-obj url)
-    (when (> (hash-table-count pdd--shared-common-storage) 1234)
-      (clrhash pdd--shared-common-storage))
+    (when (> (hash-table-count pdd-shared-common-storage) 1234)
+      (clrhash pdd-shared-common-storage))
     (url-generic-parse-url url)))
 
 (defun pdd-parse-proxy-url (proxy-url)
@@ -603,12 +603,11 @@ Besides globally set, it also can be dynamically binding in let.")
 
 (defvar pdd-done nil)
 
-(defvar pdd-fail nil)
-
 (defvar pdd-fine nil)
 
 (defconst pdd-default-request-transformers
-  '(pdd-transform-req-done
+  '(pdd-transform-req-init
+    pdd-transform-req-done
     pdd-transform-req-peek
     pdd-transform-req-fail
     pdd-transform-req-headers
@@ -785,7 +784,6 @@ Returns response data in sync mode, task object in async mode."
       pdd-data
       pdd-peek
       pdd-done
-      pdd-fail
       pdd-fine)
     "List of dynamic variables whose bindings should penetrate async callbacks."))
 
@@ -1902,6 +1900,15 @@ If JAR is nil, operates on the default cookie jar."
   "Return the request transformers will be used by BACKEND."
   pdd-default-request-transformers)
 
+(cl-defmethod pdd-transform-req-init ((request pdd-request))
+  "Construct the :init callback handler for REQUEST."
+  (with-slots (init) request
+    (let ((init1 init))
+      (setf init
+            (lambda ()
+              (when init1
+                (pdd-funcall init1 (list request))))))))
+
 (cl-defmethod pdd-transform-req-done ((request pdd-request))
   "Construct the :done callback handler for REQUEST."
   (with-slots (url done buffer) request
@@ -1937,26 +1944,27 @@ If JAR is nil, operates on the default cookie jar."
 (cl-defmethod pdd-transform-req-peek ((request pdd-request))
   "Construct the :peek callback handler for REQUEST."
   (with-slots (peek fail abort-flag) request
-    (when-let* ((peek1 peek))
+    (let ((peek1 peek))
       (setf peek
             (lambda ()
-              (if abort-flag
-                  (pdd-log 'peek "skip peek (aborted).")
-                (with-slots (abort-flag fail) request
-                  (pdd-log 'peek "enter")
-                  (condition-case err1
-                      (if (zerop (length (pdd-function-arglist peek1)))
-                          ;; with no argument
-                          (funcall peek1)
-                        ;; arguments: (&optional headers process request)
-                        (let* ((headers (pdd-extract-http-headers))
-                               (buffer (current-buffer))
-                               (process (get-buffer-process buffer)))
-                          (pdd-log 'peek "headers: %s" headers)
-                          (pdd-funcall peek1 (list :headers headers :process process :request request))))
-                    (error (pdd-log 'peek "fail: %s" err1)
-                           (setf abort-flag 'peek)
-                           (funcall fail err1))))))))))
+              (when peek1
+                (if abort-flag
+                    (pdd-log 'peek "skip peek (aborted).")
+                  (with-slots (abort-flag fail) request
+                    (pdd-log 'peek "enter")
+                    (condition-case err1
+                        (if (zerop (length (pdd-function-arglist peek1)))
+                            ;; with no argument
+                            (funcall peek1)
+                          ;; arguments: (&optional headers process request)
+                          (let* ((headers (pdd-extract-http-headers))
+                                 (buffer (current-buffer))
+                                 (process (get-buffer-process buffer)))
+                            (pdd-log 'peek "headers: %s" headers)
+                            (pdd-funcall peek1 (list :headers headers :process process :request request))))
+                      (error (pdd-log 'peek "fail: %s" err1)
+                             (setf abort-flag 'peek)
+                             (funcall fail err1)))))))))))
 
 (cl-defmethod pdd-transform-req-fail ((request pdd-request))
   "Construct the :fail callback handler for REQUEST."
@@ -2132,17 +2140,21 @@ If JAR is nil, operates on the default cookie jar."
 
 (cl-defmethod pdd-transform-req-verbose ((request pdd-request))
   "Request output in verbose mode for REQUEST.
-Make sure this is after data and headers being processed."
-  (with-slots (url method datas verbose headers buffer) request
+Delay the logic after :init to avoid unnecessary output."
+  (with-slots (verbose url method datas headers buffer init) request
     (when verbose
-      (let* ((hs (mapconcat (lambda (header)
-                              (format "> %s: %s" (car header) (cdr header)))
-                            headers "\n"))
-             (ds (when (> (length datas) 0)
-                   (concat "* " (car (pdd-split-string-by datas "\n")) "\n")))
-             (str (concat "\n* " (upcase (format "%s " method)) url "\n" hs "\n" ds)))
-        (with-current-buffer buffer
-          (funcall (if (functionp verbose) verbose #'princ) str))))))
+      (setf init
+            (let ((init1 init))
+              (lambda ()
+                (funcall init1)
+                (let* ((hs (mapconcat (lambda (header)
+                                        (format "> %s: %s" (car header) (cdr header)))
+                                      headers "\n"))
+                       (ds (when (> (length datas) 0)
+                             (concat "* " (car (pdd-split-string-by datas "\n")) "\n")))
+                       (str (concat "\n* " (upcase (format "%s " method)) url "\n" hs "\n" ds)))
+                  (with-current-buffer buffer
+                    (funcall (if (functionp verbose) verbose #'princ) str)))))))))
 
 (cl-defgeneric pdd-make-request (backend &rest _arg)
   "Instance request object for BACKEND."
@@ -2156,7 +2168,7 @@ Make sure this is after data and headers being processed."
 
 (cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
   "Initialize the configs for REQUEST."
-  (pdd-log 'req "req:init...")
+  (pdd-log 'req "initialize-instance...")
   (with-slots (url method params headers data peek done fail fine timeout max-retry cache queue sync abort-flag buffer backend task verbose) request
     (when (and pdd-base-url (string-prefix-p "/" url))
       (setf url (concat pdd-base-url url)))
@@ -2171,8 +2183,6 @@ Make sure this is after data and headers being processed."
       (setf peek pdd-peek))
     (unless (slot-boundp request 'done)
       (setf done pdd-done))
-    (unless (slot-boundp request 'fail)
-      (setf fail pdd-fail))
     (unless (slot-boundp request 'fine)
       (setf fine pdd-fine))
     (unless (slot-boundp request 'timeout)
@@ -2202,7 +2212,7 @@ Make sure this is after data and headers being processed."
                          (pdd-reject t1 'cancel))))))
     ;; run all of the installed transformers with request
     (cl-loop for transformer in (pdd-request-transformers backend)
-             do (pdd-log 'req "%s" (symbol-name transformer))
+             do (pdd-log 'req ".%s" (symbol-name transformer))
              do (funcall transformer request))))
 
 (cl-defmethod pdd :around ((backend pdd-http-backend) &rest args)
@@ -2210,31 +2220,38 @@ Make sure this is after data and headers being processed."
 ARGS should a request instances or keywords to build the request."
   (let (request)
     (condition-case err
-        (with-slots (sync init process task queue cache abort-flag begtime)
-            (setq request
-                  (if (cl-typep (car args) 'pdd-request)
-                      (car args)
-                    (apply #'pdd-make-request backend args)))
-          (pdd-log 'req "pdd:around...")
-          (if-let* ((entry (and cache (pdd-cacher-get cache request))))
-              (if sync entry (pdd-resolve entry))
-            (let ((real-queue (if (functionp queue)
-                                  (pdd-funcall queue (list request))
-                                queue)))
-              (if (or sync (null real-queue) (memq task (oref real-queue running))) ; for retry logic
-                  (let ((result (progn (if init (pdd-funcall init (list request)))
+        (progn
+          (pdd-log 'pdd:around "make request...")
+          (setq request
+                (if (cl-typep (car args) 'pdd-request)
+                    (car args)
+                  (apply #'pdd-make-request backend args)))
+          (with-slots (sync init process task queue cache abort-flag begtime) request
+            (if-let* ((entry (and cache (pdd-cacher-get cache request))))
+                (progn
+                  (pdd-log 'pdd:around "hit cache...")
+                  (if sync entry (pdd-resolve entry)))
+              (let ((real-queue (if (functionp queue)
+                                    (pdd-funcall queue (list request))
+                                  queue)))
+                (if (or sync (null real-queue) (memq task (oref real-queue running))) ; for retry logic
+                    (let ((result (progn
+                                    (pdd-log 'pdd:around "dispatch to %s..." backend)
+                                    (if init (funcall init))
+                                    (setf abort-flag nil begtime (float-time))
+                                    (cl-call-next-method backend :request request))))
+                      (if sync result (setf process result) task))
+                  (pdd-log 'pdd:around "queue...")
+                  (let* ((context (pdd--capture-dynamic-context))
+                         (callback (lambda ()
+                                     (pdd--with-restored-dynamic-context context
+                                       (pdd-log 'pdd:around "dispatch to %s..." backend)
+                                       (if init (funcall init))
                                        (setf abort-flag nil begtime (float-time))
-                                       (cl-call-next-method backend :request request))))
-                    (if sync result (setf process result) task))
-                (let* ((context (pdd--capture-dynamic-context))
-                       (callback (lambda ()
-                                   (pdd--with-restored-dynamic-context context
-                                     (if init (pdd-funcall init (list request)))
-                                     (setf abort-flag nil begtime (float-time))
-                                     (setf process (cl-call-next-method backend :request request))))))
-                  (pdd-log 'queue "acquire queue: %s" real-queue)
-                  (pdd-queue-acquire real-queue (cons task (lambda () (run-at-time 0 nil callback))))
-                  task)))))
+                                       (setf process (cl-call-next-method backend :request request))))))
+                    (pdd-log 'queue "acquire queue: %s" real-queue)
+                    (pdd-queue-acquire real-queue (cons task (lambda () (run-at-time 0 nil callback))))
+                    task))))))
       (error (if request
                  (funcall (oref request fail) err)
                (message "Caught error during pdd:around: %s" err))))))
@@ -2599,9 +2616,11 @@ ARGS should a request instances or keywords to build the request."
   (setq plz-curl-program \"c:/msys64/usr/bin/curl.exe\")\n
 Or switch http backend to `pdd-url-backend' instead:\n
   (setq pdd-backend (pdd-url-backend))")))))
-        (if-let* ((res (plz-error-response error))
-                  (code (plz-response-status res)))
-            (list 'error (pdd-http-code-text code) code)
+        (if-let* ((resp (plz-error-response error))
+                  (code (plz-response-status resp)))
+            (list 'error
+                  (or (plz-response-body resp)
+                      (pdd-http-code-text code) code))
           error)))))
 
 (cl-defmethod pdd ((backend pdd-curl-backend) &key request)
