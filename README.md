@@ -18,9 +18,8 @@ Why this name?
 Table of contents:
 - [Usage](#Usage) · [API](#API) · [Examples](#Examples)
 - [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md)
-- [Improve request user experience with `:cache`](docs/cacher.md)
-- [Control concurrency with `:queue`](docs/queue.md)
-- [The power of Promise and Async/Await `(pdd-task)`](docs/task-and-async-await.md)
+- [How to use `cache`](docs/cacher.md) | [Control concurrency with `:queue`](docs/queue.md)
+- [The power of **Promise** and **Async/Await** `(pdd-task)`](docs/task-and-async-await.md)
 - [Integrate `timers` with task and request `(pdd-expire/delay/interval)`](docs/task-timers.md)
 - [Integrate `make-process` with task and request `(pdd-exec)`](docs/task-process.md)
 - [Compare: who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
@@ -304,7 +303,7 @@ Cookies auto management with `cookie-jar` ([more](docs/cookie-jar.md)):
 Use `:cache` to enable cache support for current request ([more](docs/cacher.md)):
 ```emacs-lisp
 (pdd "https://httpbin.org/ip" :cache 5)
-(pdd "https://httpbin.org/ip" :cache (pdd-cacher :ttl 5 :keys '(url method) :storage 'xxx))
+(pdd "https://httpbin.org/ip" :cache (pdd-cacher :ttl 5 :key '(url method)))
 ```
 
 Use `:verbose` to inspect the request/response headers:
