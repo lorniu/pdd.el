@@ -309,18 +309,21 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
             (and (>= chunks 1) (= (length it) 100)))))
 
 (pdd-deftests fine ()
-  (should (pdd "/uuid"
-            :done (lambda () (car--- r))
-            :fine (lambda () (setq it 666)))
+  (should (ignore-errors
+            (pdd "/uuid"
+              :done (lambda () (car--- r))
+              :fine (lambda () (setq it 666))))
           (equal it 666))
-  (should (pdd "/uuid"
-            :done (lambda (rs) ())
-            :fine (lambda (rs) (setq it rs)))
+  (should (ignore-errors
+            (pdd "/uuid"
+              :done (lambda (rs) ())
+              :fine (lambda (rs) (setq it rs))))
           (cl-typep it #'pdd-request))
-  (should (pdd "/uuid"
-            :done (lambda () (car--- r))
-            :fail (lambda () (car--- r))
-            :fine (lambda () (setq it 676)))
+  (should (ignore-errors
+            (pdd "/uuid"
+              :done (lambda () (car--- r))
+              :fail (lambda () (car--- r))
+              :fine (lambda () (setq it 676))))
           (equal it 676)))
 
 (pdd-deftests binary-data ()

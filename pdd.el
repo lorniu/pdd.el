@@ -6,7 +6,7 @@
 ;; URL: https://github.com/lorniu/pdd.el
 ;; License: GPL-3.0-or-later
 ;; Package-Requires: ((emacs "28.1"))
-;; Version: 0.2.0
+;; Version: 0.2.1
 
 ;; This file is not part of GNU Emacs.
 
@@ -2093,11 +2093,10 @@ Otherwise, delete only the item."
   "Construct the :fail callback handler for REQUEST."
   (with-slots (url max-retry fail fine abort-flag task queue backend) request
     (setf fail
-          (let ((fail1 (if (slot-boundp request 'fail) fail 'unset))
-                (fail-default pdd-default-error-handler))
+          (let ((fail-user (if (slot-boundp request 'fail) fail 'unset)))
             (lambda (err)
               (unless (memq abort-flag '(cancel abort))
-                (pdd-log 'fail "%s | %s" err (or fail1 'None))
+                (pdd-log 'fail "%s | %s" err (or fail-user 'None))
                 ;; retry
                 (if (and (cl-plusp max-retry) (funcall pdd-retry-condition err))
                     (progn
@@ -2114,29 +2113,32 @@ Otherwise, delete only the item."
                                (backtrace)
                                (buffer-string))))
                   (unwind-protect
-                      (condition-case err1
-                          (cond ; error -> :fail -> task chain -> on-rejected | default handler
-                           ((pdd-task-p task)
-                            (when (not (eq fail1 'unset))
-                              (aset task 7 t) ; set inhibit-default-rejection-p flag
-                              (condition-case err2
-                                  (when fail1
-                                    (pdd-log 'fail "calling user :fail callback")
-                                    (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
-                                (error (setq err err2))))
-                            (pdd-log 'fail "reject error to task: %s" err)
-                            (pdd-log 'task "TASK FAIL:  %s" url)
-                            (pdd-reject task err (pdd--capture-dynamic-context))
-                            task)
-                           ((not (eq fail1 'unset))
-                            (when fail1
+                      (if (pdd-task-p task) ; [async] error -> :fail -> task chain -> on-rejected | default handler
+                          (condition-case err1
+                              (progn
+                                (when (not (eq fail-user 'unset))
+                                  (aset task 7 t) ; set inhibit-default-rejection-p flag
+                                  (condition-case err2
+                                      (when fail-user
+                                        (pdd-log 'fail "calling user :fail callback")
+                                        (pdd-funcall fail-user (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
+                                    (error (setq err err2))))
+                                (pdd-log 'fail "reject error to task: %s" err)
+                                (pdd-log 'task "TASK FAIL:  %s" url)
+                                (pdd-reject task err (pdd--capture-dynamic-context))
+                                task)
+                            (error (pdd-log 'fail "oooop, error occurs when display error.")
+                                   (pdd-reject task (format "Oooop, error in error handling: %s" err1)
+                                               (pdd--capture-dynamic-context))
+                                   task))
+                        (if (not (eq fail-user 'unset))
+                            (when fail-user
                               (pdd-log 'fail "display error with: fail callback.")
-                              (pdd-funcall fail1 (list :error err :request request :text (cadr err) :code (car-safe (cddr err))))))
-                           (fail-default
-                            (pdd-log 'fail "display error with: default error handler")
-                            (pdd-funcall fail-default (list err request))))
-                        (error (pdd-log 'fail "oooop, error occurs when display error.")
-                               (message "Oooop, error in error handling: %s" err1)))
+                              (pdd-funcall fail-user (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
+                          (pdd-log 'fail "signaling error for sync request: %s" err)
+                          (if (atom err)
+                              (signal 'user-error (list (format "%s" err)))
+                            (signal (car err) (cdr err)))))
                     ;; finally
                     (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
                     (ignore-errors (pdd-funcall fine (list request)))))))))))
@@ -2652,7 +2654,10 @@ ARGS should a request instances or keywords to build the request."
                                                   (funcall fail err))
                                          (pdd-log 'url-backend "before done")
                                          (setq final-data (pdd-funcall done (pdd-transform-response request))))
-                                     (error (funcall fail err1)))))
+                                     (error (if sync
+                                                (condition-case err2 (funcall fail err1)
+                                                  (error (setq final-data `(:error ,@(cdr err2)))))
+                                              (funcall fail err1))))))
                              (kill-buffer final-buffer)))))
           (setq init-buffer (url-retrieve url final-cb nil t t)
                 init-process (get-buffer-process init-buffer))
@@ -2703,7 +2708,9 @@ ARGS should a request instances or keywords to build the request."
                       (throw 'pdd-done 'exception))))
                 (while (and (process-live-p init-process) (not abort-flag) (not final-buffer))
                   (accept-process-output nil 0.05))
-                final-data)
+                (if (eq (car-safe final-data) :error)
+                    (signal 'user-error (cdr final-data))
+                  final-data))
             init-process))))))
 
 
@@ -2762,7 +2769,8 @@ Or switch http backend to `pdd-url-backend' instead:\n
         (if-let* ((resp (plz-error-response error))
                   (code (plz-response-status resp)))
             (list 'error
-                  (or (let ((r (plz-response-body resp))) (if (cl-plusp (length r)) r))
+                  (or (and (not (memq code '(400 404 500 501)))
+                           (let ((r (plz-response-body resp))) (if (cl-plusp (length r)) r)))
                       (pdd-http-code-text code))
                   code)
           error)))))
