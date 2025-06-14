@@ -687,8 +687,8 @@ This function has two primary calling conventions:
 Returns response data in sync mode, task object in async mode."
   (declare (indent 1)))
 
-(eval-when-compile
-  (defvar pdd--dynamic-context-vars
+(eval-and-compile
+  (defconst pdd--dynamic-context-vars
     '(default-directory
       pdd-debug
       pdd-log-redirect
