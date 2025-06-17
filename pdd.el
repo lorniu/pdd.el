@@ -6,7 +6,7 @@
 ;; URL: https://github.com/lorniu/pdd.el
 ;; License: GPL-3.0-or-later
 ;; Package-Requires: ((emacs "28.1"))
-;; Version: 0.2.1
+;; Version: 0.2.2
 
 ;; This file is not part of GNU Emacs.
 
@@ -350,7 +350,16 @@ Return a plist containing all cookie attributes."
 (defun pdd-function-arglist (function)
   "Get signature of FUNCTION with cache enabled."
   (pdd-with-common-cacher (list 'signature function)
-    (help-function-arglist function)))
+    (cond
+     ((eq (car-safe function) 'lambda) (cadr function))
+     ((byte-code-function-p function)
+      (let* ((doc (downcase (documentation function))) ; assume all args are downcase
+             (arglist-from-doc
+              (ignore-errors
+                (when (and doc (string-match "\n\n(fn\\s-+.*\n?)$" doc))
+                  (cdar (read-from-string (match-string 0 doc)))))))
+        (or arglist-from-doc (help-function-arglist function))))
+     (t (help-function-arglist function)))))
 
 (defun pdd-function-arguments (function)
   "Return the required argument list of FUNCTION to build decorate function."
