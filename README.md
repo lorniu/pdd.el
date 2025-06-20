@@ -281,6 +281,15 @@ When handling multiple asynchronous requests, you may encounter **callback hell*
                       `((ip . ,(alist-get 'origin (car r1)))
                         (id . ,(alist-get 'uuid (cadr r1))))))))
     (message "> Got: %s" (alist-get 'form r2))))
+
+;; Notice: you must signal a error explicitly in :fail to propagate it to task chain
+
+(pdd-then
+    (pdd "https://httpbin.org/ip2"
+      :done (lambda (res) (message "%s" res))
+      :fail (lambda (err) (user-error "Error!")))
+  (lambda (r) (message "> next res: %s" r))
+  (lambda (r) (message "> next err: %s" r)))
 ```
 
 To control concurreny or rate limit for multiple requests, use `queue` ([more](docs/queue.md)):

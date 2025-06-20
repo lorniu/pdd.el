@@ -536,6 +536,8 @@ Besides globally set, it also can be dynamically binding in let.")
 
 (defvar pdd-done nil)
 
+(defvar pdd-fail nil)
+
 (defvar pdd-fine nil)
 
 (defconst pdd-default-request-transformers
@@ -599,11 +601,11 @@ reorder the built-in transformers unless you fully understand the consequences."
    (datas      :initform nil         :type (or string null))
    (binaryp    :initform nil         :type boolean)
    (init       :initarg :init        :type (or function null) :initform nil)
-   (peek       :initarg :peek        :type (or function null))
    (as         :initarg :as          :type (or function symbol null) :initform nil)
+   (peek       :initarg :peek        :type (or function null))
    (done       :initarg :done        :type (or function null))
    (fail       :initarg :fail        :type (or function null))
-   (fine       :initarg :fine        :type (or function null) :initform nil)
+   (fine       :initarg :fine        :type (or function null))
    (sync       :initarg :sync)
    (timeout    :initarg :timeout     :type (or number null))
    (max-retry  :initarg :max-retry   :type (or number null))
@@ -719,6 +721,7 @@ Returns response data in sync mode, task object in async mode."
       pdd-data
       pdd-peek
       pdd-done
+      pdd-fail
       pdd-fine)
     "List of dynamic variables whose bindings should penetrate async callbacks."))
 
@@ -756,16 +759,15 @@ Returns response data in sync mode, task object in async mode."
 
 Slots of task:
     status/1, values/2, reason/3, callbacks/4,
-    signal-function/5,
-    reject-handled-p/6, inhibit-default-rejection-p/7.
+    signal-function/5, reject-handled-p/6.
 
 VALUE of status:
     pending, fulfilled and rejected, default nil if not SUPPLIED.
 
 Each callback with function signature:
     (on-fulfilled on-rejected child-task captured-context)."
-  ;;              0        1   2   3   4   5   6   7
-  (vector 'pdd-task 'pending nil nil '() nil nil nil))
+  ;;              0        1   2   3   4   5   6
+  (vector 'pdd-task 'pending nil nil '() nil nil))
 
 (defun pdd-task-p (obj)
   "Judge if OBJ is a `pdd-task'."
@@ -865,7 +867,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
 
 (defun pdd-task--settle (task status v)
   "Settle TASK to STATUS with V is value or reason."
-  (pdd-with-vector (s values reason callbacks _ reject-handled-p inhibit-default-rejection-p) task
+  (pdd-with-vector (s values reason callbacks _ reject-handled-p) task
     (unless (eq s 'pending)
       (user-error "Cannot settle non-pending task"))
     (unless (memq status '(fulfilled rejected))
@@ -877,13 +879,9 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
        (setf reason v)
        ;; used to catch the final unhandled rejection, the way like javascript
        (when (and (null callbacks)
-                  (not reject-handled-p)
-                  (not inhibit-default-rejection-p))
+                  (not reject-handled-p))
          (run-with-idle-timer 0.1 nil #'pdd-task--reject-unhandled task v)))
       (_ (user-error "Wrong status settled")))
-    (when callbacks ; propagate the flag to child task
-      (let ((child-task (nth 2 (car callbacks))))
-        (aset child-task 7 inhibit-default-rejection-p)))
     (while callbacks
       (let ((cb (pop callbacks)))
         ;; This should be executed as a micro-task-queue
@@ -926,8 +924,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
       ((deal-error-with-default-error-handler ()
          `(when pdd-default-error-handler
             (when (and (eq (aref task 1) 'rejected) ; still rejected
-                       (not (aref task 6)) ; still not handled
-                       (not (aref task 7))) ; and default not inhibited
+                       (not (aref task 6))) ; still not handled
               (condition-case err
                   (pdd-funcall pdd-default-error-handler (list (car error) nil))
                 (error (message "Error executing default rejection handler: %s" err)))))))
@@ -2122,29 +2119,26 @@ Otherwise, delete only the item."
                                (backtrace)
                                (buffer-string))))
                   (unwind-protect
-                      (if (pdd-task-p task) ; [async] error -> :fail -> task chain -> on-rejected | default handler
-                          (condition-case err1
-                              (progn
-                                (when (not (eq fail-user 'unset))
-                                  (aset task 7 t) ; set inhibit-default-rejection-p flag
-                                  (condition-case err2
-                                      (when fail-user
-                                        (pdd-log 'fail "calling user :fail callback")
-                                        (pdd-funcall fail-user (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
-                                    (error (setq err err2))))
-                                (pdd-log 'fail "reject error to task: %s" err)
-                                (pdd-log 'task "TASK FAIL:  %s" url)
-                                (pdd-reject task err (pdd--capture-dynamic-context))
-                                task)
-                            (error (pdd-log 'fail "oooop, error occurs when display error.")
-                                   (pdd-reject task (format "Oooop, error in error handling: %s" err1)
-                                               (pdd--capture-dynamic-context))
-                                   task))
-                        (if (not (eq fail-user 'unset))
-                            (when fail-user
+                      (if (pdd-task-p task)
+                          ;; [async] Handle error for the task (Promise)
+                          (if (not (eq fail-user 'unset))
+                              (condition-case err1
+                                  (let ((value (pdd-funcall fail-user (list :error err :request request :text (cadr err) :code (car-safe (cddr err))))))
+                                    (pdd-log 'fail "User :fail recovered, resolving task with: %s" value)
+                                    (pdd-resolve task value))
+                                (error
+                                 (pdd-log 'fail "User :fail handler failed, rejecting task with new error: %s" err1)
+                                 (pdd-reject task err1 (pdd--capture-dynamic-context))))
+                            (progn
+                              (pdd-log 'fail "No user :fail, rejecting task with: %s" err)
+                              (pdd-log 'task "TASK FAIL:  %s" url)
+                              (pdd-reject task err (pdd--capture-dynamic-context))))
+                        ;; [sync] Handle error for synchronous request
+                        (if (functionp fail-user)
+                            (progn
                               (pdd-log 'fail "display error with: fail callback.")
                               (pdd-funcall fail-user (list :error err :request request :text (cadr err) :code (car-safe (cddr err)))))
-                          (pdd-log 'fail "signaling error for sync request: %s" err)
+                          (pdd-log 'fail "raise error for sync request: %s" err)
                           (if (atom err)
                               (signal 'user-error (list (format "%s" err)))
                             (signal (car err) (cdr err)))))
@@ -2342,6 +2336,8 @@ Delay the logic after :init to avoid unnecessary output."
       (setf peek pdd-peek))
     (unless (slot-boundp request 'done)
       (setf done pdd-done))
+    (unless (slot-boundp request 'fail)
+      (setf fail pdd-fail))
     (unless (slot-boundp request 'fine)
       (setf fine pdd-fine))
     (unless (slot-boundp request 'timeout)
@@ -2660,13 +2656,11 @@ ARGS should a request instances or keywords to build the request."
                                    (condition-case err1
                                        (if-let* ((err (pdd-transform-error backend request status)))
                                            (progn (pdd-log 'url-backend "before fail")
-                                                  (funcall fail err))
+                                                  (setq final-data (funcall fail err)))
                                          (pdd-log 'url-backend "before done")
                                          (setq final-data (pdd-funcall done (pdd-transform-response request))))
-                                     (error (if sync
-                                                (condition-case err2 (funcall fail err1)
-                                                  (error (setq final-data `(:error ,@(cdr err2)))))
-                                              (funcall fail err1))))))
+                                     (error (when sync ; avoid fail in filter prefix output
+                                              (setq final-data `(:error ,@(cdr err1))))))))
                              (kill-buffer final-buffer)))))
           (setq init-buffer (url-retrieve url final-cb nil t t)
                 init-process (get-buffer-process init-buffer))
