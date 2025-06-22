@@ -1219,8 +1219,8 @@ Example:
 (defvar pdd--proc-send-need-newline '("tee" "echo"))
 
 ;;;###autoload
-(cl-defun pdd-exec (cmd &rest args &key env as peek init done fail fine &allow-other-keys)
-  "Create a promise-based task for managing external processes.
+(cl-defun pdd-exec (cmd &rest args &key env as peek init done fail fine pipe sync &allow-other-keys)
+  "Create a promise-based task for CMD or run CMD synchronously.
 
 Arguments:
 
@@ -1241,6 +1241,8 @@ Arguments:
   DONE:    Success callback (lambda (output exit-status))
   FAIL:    Error handler (lambda (error-message))
   FINE:    Finalizer (lambda (process))
+  PIPE:    If t, use pipe connection type for process explicitly
+  SYNC:    If t, execute synchronously. In this case `:peek' is ignored
 
 Smart cmd and args syntax:
 
@@ -1252,6 +1254,7 @@ Smart cmd and args syntax:
   (pdd-exec [ls -a -r] :done #\\='print) ; vector is like list
   (pdd-exec \"ls -a -r\" :done #\\='print) ; shell command format string
   (pdd-exec t \\='(tee \"~/aaa.txt\") :init \"pipe this to tee to save\")
+  (pdd-exec [ps aux] :sync t :pipe t) ; sync & pipe
 
 Bind extra proc environments:
 
@@ -1279,9 +1282,10 @@ Play with task system:
     (lambda (r) (pdd-interval 1 5 (lambda (i) (message \"> %d\" i)) :done r))
     (lambda (r) (message \"Get interface: %s\" (nth (random (length r)) r))))
 
-Returns a `pdd-task' object that can be canceled using `pdd-signal'"
+Return a ‘pdd-task’ object that can be canceled using ‘pdd-signal’ by default,
+or return the result directly when SYNC is t."
   (declare (indent defun))
-  (ignore env as peek init done fail fine) ; parse from args later, add this to silence linter
+  (ignore env as peek init done fail fine pipe sync) ; parse from args later, add this to silence linter
   (let (cmd-args keywords program)
     ;; parse arguments, cl-defun is different from common lisp defun
     (cl-loop for arg in (cons cmd args) for i from -1
@@ -1301,84 +1305,108 @@ Returns a `pdd-task' object that can be canceled using `pdd-signal'"
               cmd-args (list shell-file-name shell-command-switch
                              (mapconcat #'identity (cdr cmd-args) " ")))
       (setq program (car cmd-args)))
-    (cl-destructuring-bind (&key env as peek init done fail fine &allow-other-keys) keywords
-      (pdd-with-new-task
-       (let* ((task it)
-              (proc nil)
-              (proc-name (format "pdd-proc-%s-%s" program (+ 10000 (random 10000))))
-              (proc-buffer (generate-new-buffer (format " *%s*" proc-name)))
-              (proc-envs (cl-loop for item in (ensure-list env)
-                                  if (consp item)
-                                  collect (format "%s=%s"
-                                                  (upcase (format "%s" (car item)))
-                                                  (string-join (ensure-list (cdr item)) path-separator))
-                                  if (stringp item) collect item))
-              (process-environment (append proc-envs process-environment))
-              (exit-status nil)
-              (killed-by-user nil)
-              (context (pdd--capture-dynamic-context))
-              (signal-fn (lambda (sig)
-                           (when (eq sig 'cancel)
-                             (setq killed-by-user t)
-                             (when (process-live-p proc)
-                               (delete-process proc)))))
-              (filter-fn (lambda (p string)
-                           (with-current-buffer (process-buffer p)
-                             (insert (ansi-color-apply string))
-                             (if peek (pdd-funcall peek (list string p))))))
-              (as-line-fn (lambda ()
-                            (let (lines)
-                              (save-excursion
-                                (goto-char (point-min))
-                                (while (not (eobp))
-                                  (setq lines (cons (buffer-substring-no-properties (line-beginning-position) (line-end-position)) lines))
-                                  (forward-line 1))
-                                (nreverse lines)))))
-              (sentinel-fn (lambda (p event)
-                             (with-current-buffer (process-buffer p)
-                               (pdd-log 'cmd "event: %s" event)
-                               (unwind-protect
-                                   (progn
-                                     (cond
-                                      ((string-prefix-p "exited abnormally" event)
-                                       (setq exit-status (process-exit-status p)))
-                                      ((string= event "finished\n")
-                                       (setq exit-status 0)))
-                                     (cond
-                                      (killed-by-user
-                                       (pdd-reject task 'process-canceled context))
-                                      ((and exit-status (/= exit-status 0))
-                                       (pdd-reject task (format "Exit %d. %s" exit-status (buffer-string)) context))
-                                      (t
-                                       (pdd--with-restored-dynamic-context context
-                                         (let ((res (cond ((eq as 'line) (funcall as-line-fn))
-                                                          ((functionp as) (funcall as))
-                                                          (t (buffer-string)))))
-                                           (pdd-resolve task res exit-status))))))
-                                 (when (buffer-live-p (current-buffer))
-                                   (kill-buffer (current-buffer)))
-                                 (if fine (pdd-funcall fine (list proc))))))))
-         (condition-case err
-             (progn
-               (pdd-log 'cmd "%s: %s %s" proc-name cmd-args proc-envs)
-               (setq proc (make-process
-                           :name proc-name
-                           :command cmd-args
-                           :buffer proc-buffer
-                           :filter filter-fn
-                           :sentinel sentinel-fn))
-               (when init
-                 (if (functionp init)
-                     (pdd-funcall init (list proc))
-                   (let* ((str (format "%s" init))
-                          ;; tee and some same processes will hang when no newline append at last
-                          ;; i don't know if there is better way to resolve this
-                          (str (concat str (if (member program pdd--proc-send-need-newline) "\n"))))
-                     (process-send-string proc str)
-                     (process-send-eof proc)))))
-           (error (pdd-reject task (format "Process creation failed: %s" err) context)))
-         (setq it (pdd--wrap-task-handlers it done fail fine proc))
-         :signal signal-fn)))))
+    (cl-destructuring-bind (&key env as peek init done fail fine pipe sync &allow-other-keys) keywords
+      (unless (memq :sync args) (setq sync pdd-sync))
+      (let* ((proc-name (format "pdd-proc-%s-%s" program (+ 10000 (random 10000))))
+             (proc-buffer (generate-new-buffer (format " *%s*" proc-name)))
+             (proc-envs (cl-loop for item in (ensure-list env)
+                                 if (consp item)
+                                 collect (format "%s=%s"
+                                                 (upcase (format "%s" (car item)))
+                                                 (string-join (ensure-list (cdr item)) path-separator))
+                                 if (stringp item) collect item))
+             (process-environment (append proc-envs process-environment))
+             (process-connection-type (if (memq :pipe args)
+                                          (if pipe nil t)
+                                        process-connection-type))
+             (init-proc (lambda (proc)
+                          (when init
+                            (if (functionp init)
+                                (pdd-funcall init (list proc))
+                              (let* ((str (if (stringp init) init (format "%s" init)))
+                                     ;; tee and some same processes will hang when no newline append at last
+                                     ;; i don't know if there is better way to resolve this
+                                     (str (concat str (if (member program pdd--proc-send-need-newline) "\n"))))
+                                (process-send-string proc str)
+                                (process-send-eof proc))))))
+             (as-line-fn (lambda ()
+                           (with-current-buffer proc-buffer
+                             (let (lines)
+                               (save-excursion
+                                 (goto-char (point-min))
+                                 (while (not (eobp))
+                                   (push (buffer-substring-no-properties (line-beginning-position) (line-end-position)) lines)
+                                   (forward-line 1))
+                                 (nreverse lines)))))))
+        (if (eq sync t)
+            ;; --- Synchronous ---
+            (let (proc result)
+              (unwind-protect
+                  (progn
+                    (pdd-log 'cmd "SYNC %s: %s %s" proc-name cmd-args proc-envs)
+                    (setq proc (apply #'start-process proc-name proc-buffer program (cdr cmd-args)))
+                    (funcall init-proc proc)
+                    (while (accept-process-output proc))
+                    (let ((exit-status (process-exit-status proc)))
+                      (if (and exit-status (= exit-status 0))
+                          (let ((raw (with-current-buffer proc-buffer
+                                       (cond ((eq as 'line) (funcall as-line-fn))
+                                             ((functionp as) (funcall as))
+                                             (t (buffer-string))))))
+                            (setq result (if done (pdd-funcall done (list raw exit-status)) raw)))
+                        (let ((reason (format "Process %s exited with status %d: %s"
+                                              program exit-status (with-current-buffer proc-buffer (buffer-string)))))
+                          (if fail (setq result (pdd-funcall fail (list reason))) (error "%s" reason))))))
+                (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
+                (when (and proc (process-live-p proc)) (delete-process proc))
+                (if fine (pdd-funcall fine (list proc))))
+              result)
+          ;; --- Asynchronous ---
+          (pdd-with-new-task
+           (let* ((task it) (proc nil) (killed-by-user nil) (exit-status nil)
+                  (context (pdd--capture-dynamic-context))
+                  (signal-fn (lambda (sig)
+                               (when (eq sig 'cancel)
+                                 (setq killed-by-user t)
+                                 (when (process-live-p proc)
+                                   (delete-process proc)))))
+                  (filter-fn (lambda (p string)
+                               (with-current-buffer (process-buffer p)
+                                 (insert (ansi-color-apply string))
+                                 (if peek (pdd-funcall peek (list string p))))))
+                  (sentinel-fn (lambda (p event)
+                                 (with-current-buffer (process-buffer p)
+                                   (pdd-log 'cmd "event: %s" event)
+                                   (unwind-protect
+                                       (progn
+                                         (cond
+                                          ((string-prefix-p "exited abnormally" event)
+                                           (setq exit-status (process-exit-status p)))
+                                          ((string= event "finished\n")
+                                           (setq exit-status 0)))
+                                         (cond
+                                          (killed-by-user
+                                           (pdd-reject task 'process-canceled context))
+                                          ((and exit-status (/= exit-status 0))
+                                           (pdd-reject task (format "Exit %d. %s" exit-status (buffer-string)) context))
+                                          (t
+                                           (pdd--with-restored-dynamic-context context
+                                             (let ((res (cond ((eq as 'line) (funcall as-line-fn))
+                                                              ((functionp as) (funcall as))
+                                                              (t (buffer-string)))))
+                                               (pdd-resolve task res exit-status))))))
+                                     (when (buffer-live-p (current-buffer))
+                                       (kill-buffer (current-buffer)))
+                                     (if fine (pdd-funcall fine (list proc))))))))
+             (condition-case err
+                 (progn
+                   (pdd-log 'cmd "%s: %s %s" proc-name cmd-args proc-envs)
+                   (setq proc (make-process :name proc-name :command cmd-args :buffer proc-buffer
+                                            :filter filter-fn :sentinel sentinel-fn))
+                   (funcall init-proc proc))
+               (error (pdd-reject task (format "Process creation failed: %s" err) context)))
+             (setq it (pdd--wrap-task-handlers it done fail fine proc))
+             :signal signal-fn)))))))
 
 ;; Async/Await
 

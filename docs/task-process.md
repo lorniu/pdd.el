@@ -1,6 +1,6 @@
 # Integrate make-process/shell-command with pdd-task
 
-Interesting utility, interesting try. Non-block and easy.
+Interesting utility, interesting try.
 
 Current issue:
 > Some processes may wait for stdin and hang without exit. However, Emacs cannot determine which one will behave like this. This sometimes leads to not getting the results back, you need to kill the process manually. I don't know if there is a way to solve this. So, be especially careful to pay attention to processes that need to read standard input.
@@ -9,7 +9,7 @@ Current issue:
 
 The only API is `pdd-exec`:
 ```
-(pdd-exec CMD &rest ARGS &key ENV AS PEEK INIT DONE FAIL FINE &allow-other-keys)
+(pdd-exec CMD &rest ARGS &key ENV AS PEEK INIT DONE FAIL FINE PIPE SYNC &allow-other-keys)
 
   CMD:     Executable name (string, list, vector or t)
            * if this is t, ARGS will be wrapped to shell command
@@ -28,8 +28,11 @@ The only API is `pdd-exec`:
   DONE:    Success callback (lambda (output exit-status))
   FAIL:    Error handler (lambda (error-message))
   FINE:    Finalizer (lambda (process))
+  PIPE:    If t, use pipe connection type for process explicitly
+  SYNC:    If t, execute synchronously. In this case `:peek' is ignored
 
-Returns a ‘pdd-task’ object that can be canceled using ‘pdd-signal’
+Return a ‘pdd-task’ object that can be canceled using ‘pdd-signal’ by default,
+or return the result directly when SYNC is t.
 ```
 
 Smart cmd and args syntax:
@@ -42,6 +45,7 @@ Smart cmd and args syntax:
 (pdd-exec [ls -a -r] :done #'print) ; vector is like list
 (pdd-exec "ls -a -r" :done #'print) ; shell command format string
 (pdd-exec t '(tee "~/aaa.txt") :init "pipe this to tee to save") ; t: execute as shell command
+(pdd-exec [ps aux] :sync t :pipe t) ; sync & pipe
 ```
 
 Bind extra proc environments:
