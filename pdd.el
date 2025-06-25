@@ -536,7 +536,10 @@ Besides globally set, it also can be dynamically binding in let.")
 
 (defvar pdd-done nil)
 
-(defvar pdd-fail nil)
+(defvar pdd-fail t
+  "This can be nil, t or a function.
+Value t for redirecting to default error handler.
+Value nil for resolving task as nil.")
 
 (defvar pdd-fine nil)
 
@@ -604,7 +607,7 @@ reorder the built-in transformers unless you fully understand the consequences."
    (as         :initarg :as          :type (or function symbol null) :initform nil)
    (peek       :initarg :peek        :type (or function null))
    (done       :initarg :done        :type (or function null))
-   (fail       :initarg :fail        :type (or function null))
+   (fail       :initarg :fail        :type (or function null t))
    (fine       :initarg :fine        :type (or function null))
    (sync       :initarg :sync)
    (timeout    :initarg :timeout     :type (or number null))
@@ -765,19 +768,24 @@ Returns response data in sync mode, task object in async mode."
 
 Slots of task:
     status/1, values/2, reason/3, callbacks/4,
-    signal-function/5, reject-handled-p/6.
+    signal-function/5, reject-handled-p/6, parent/7.
 
 VALUE of status:
     pending, fulfilled and rejected, default nil if not SUPPLIED.
 
 Each callback with function signature:
     (on-fulfilled on-rejected child-task captured-context)."
-  ;;              0        1   2   3   4   5   6
-  (vector 'pdd-task 'pending nil nil '() nil nil))
+  ;;              0        1   2   3   4   5   6   7
+  (vector 'pdd-task 'pending nil nil '() nil nil nil))
 
 (defun pdd-task-p (obj)
   "Judge if OBJ is a `pdd-task'."
   (and (vectorp obj) (eq (aref obj 0) 'pdd-task)))
+
+(defun pdd-task-pending-p (task)
+  "Check if status of TASK is pending."
+  (cl-assert (pdd-task-p task))
+  (eq (aref task 1) 'pending))
 
 (defun pdd-task-ensure (value)
   "Ensure VALUE is a task instance."
@@ -807,6 +815,7 @@ this is just like funcall with arguments reversed."
   (declare (indent 1))
   (if (pdd-task-p task)
       (pdd-with-new-task
+       (aset it 7 task) ; set parent
        (let ((context (pdd--capture-dynamic-context)))
          (pdd-log 'task "    then | %s" (aref task 3))
          (when (and on-rejected (functionp on-rejected))
@@ -830,7 +839,7 @@ Otherwise, create a new `pdd-task' which is rejected because of (car args)."
        (aset it 2 args))
     (let* ((task (car args)) (values (cdr args)) (obj (car values)))
       (pdd-log 'task " resolve | %s, value: %s" task values)
-      (cond ((not (eq (aref task 1) 'pending)) nil)
+      (cond ((not (pdd-task-pending-p task)) nil)
             ((eq task obj)
              (pdd-reject task (list 'type-error "Cannot resolve task with itself")))
             ((pdd-task-p obj)
@@ -862,14 +871,23 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
       (pdd-task--settle task 'rejected reason))))
 
 (defun pdd-signal (task &optional signal)
-  "Send a SIGNAL to the pending TASK to run the signal function if exists."
-  (pdd-with-vector (status _ _ callbacks signal-fn) task
-    (when (eq status 'pending)
-      (pdd-log 'task "  signal | %s, signal: %s" task signal)
-      (if (functionp signal)
-          (funcall signal)
-        (when (functionp signal-fn)
-          (pdd-funcall signal-fn (list signal task)))))))
+  "Send SIGNAL to TASK to run the proper signal function in task chain."
+  (when (pdd-task-pending-p task)
+    (let ((target task) parent)
+      ;; the real running target on task chain
+      (while (and (setq parent (aref target 7)) (pdd-task-pending-p parent))
+        (pdd-log 'signal "> %s: %s" (aref parent 8) (aref parent 5))
+        (setq target parent))
+      ;; only signal the target task
+      (when (pdd-task-pending-p target)
+        (pdd-log 'signal "on target %s, signal: %s" target signal)
+        (if (functionp signal)
+            (funcall signal)
+          (let ((signal-fn (aref target 5)))
+            (if (functionp signal-fn)
+                (pdd-funcall signal-fn (list signal target))
+              ;; default signal for cancel
+              (pdd-reject target 'cancel))))))))
 
 (defun pdd-task--settle (task status v)
   "Settle TASK to STATUS with V is value or reason."
@@ -878,6 +896,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
       (user-error "Cannot settle non-pending task"))
     (unless (memq status '(fulfilled rejected))
       (user-error "Pending task only can be changed to fulfilled or rejected"))
+    (aset task 5 nil) ; A settled task is no longer cancellable.
     (pcase (setf s status)
       ('fulfilled
        (setf values v))
@@ -889,7 +908,11 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
          (run-with-idle-timer 0.1 nil #'pdd-task--reject-unhandled task v)))
       (_ (user-error "Wrong status settled")))
     (while callbacks
-      (let ((cb (pop callbacks)))
+      (let* ((cb (pop callbacks))
+             (child-task (nth 2 cb)))
+        ;; Break child's parent link to prevent memory leaks from circular references
+        (when (pdd-task-p child-task)
+          (aset child-task 7 nil))
         ;; This should be executed as a micro-task-queue
         (run-at-time 0 nil (lambda () (pdd-task--execute task cb)))))))
 
@@ -900,27 +923,40 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
     (cl-destructuring-bind (on-fulfilled on-rejected child-task context) callback
       (condition-case err1
           (pdd-with-vector (status values reason) task
-            (pcase status
-              ('fulfilled
-               (if (functionp on-fulfilled)
-                   (let ((result (pdd--with-restored-dynamic-context context
-                                   (pdd-funcall on-fulfilled values))))
-                     (if (pdd-task-p result)
-                         (pdd-then result
-                           (lambda (v) (pdd-resolve child-task v))
-                           (lambda (r) (pdd-reject child-task r)))
-                       (pdd-resolve child-task result)))
-                 (apply #'pdd-resolve child-task values)))
-              ('rejected
-               (if (functionp on-rejected)
-                   (let ((result (pdd--with-restored-dynamic-context context
-                                   (pdd-funcall on-rejected reason))))
-                     (if (pdd-task-p result)
-                         (pdd-then result
-                           (lambda (v) (pdd-resolve child-task v))
-                           (lambda (r) (pdd-reject child-task r)))
-                       (pdd-resolve child-task result)))
-                 (apply #'pdd-reject child-task reason))))
+            (cl-macrolet ((chain-task-with-signal-propagation (&rest args)
+                            `(let ((user-signal-fn (aref child-task 5)))
+                               ;; Make sure signal can reach the running task
+                               (aset child-task 5
+                                     (lambda (sig target)
+                                       (if (functionp user-signal-fn)
+                                           (pdd-funcall user-signal-fn (list sig target))
+                                         (pdd-reject child-task 'cancel))
+                                       (pdd-signal result sig)))
+                               ;; Bind then dynamically
+                               (pdd-then result
+                                 (lambda (v)
+                                   (when (pdd-task-pending-p child-task)
+                                     (pdd-resolve child-task v)))
+                                 (lambda (r)
+                                   (when (pdd-task-pending-p child-task)
+                                     (pdd-reject child-task r)))))))
+              (pcase status
+                ('fulfilled
+                 (if (functionp on-fulfilled)
+                     (let ((result (pdd--with-restored-dynamic-context context
+                                     (pdd-funcall on-fulfilled values))))
+                       (if (pdd-task-p result)
+                           (chain-task-with-signal-propagation)
+                         (pdd-resolve child-task result)))
+                   (apply #'pdd-resolve child-task values)))
+                ('rejected
+                 (if (functionp on-rejected)
+                     (let ((result (pdd--with-restored-dynamic-context context
+                                     (pdd-funcall on-rejected reason))))
+                       (if (pdd-task-p result)
+                           (chain-task-with-signal-propagation)
+                         (pdd-resolve child-task result)))
+                   (apply #'pdd-reject child-task reason)))))
             (pdd-log 'task "        -> %s" task))
         (error (pdd-reject child-task err1))))))
 
@@ -1046,7 +1082,7 @@ NOTICE: variable `pdd-sync' always be nil in the inner context."
 (defun pdd-task--signal-cancel (tasks)
   "Send cancel signals to all TASKS."
   (dolist (task tasks)
-    (when (eq (aref task 1) 'pending)
+    (when (pdd-task-pending-p task)
       (pdd-signal task 'cancel))))
 
 (defconst pdd-task--timer-pool (make-hash-table :weakness 'key))
@@ -1085,7 +1121,7 @@ TIME is same as the argument of `run-at-time'."
    (let ((timer (run-at-time time nil (lambda () (pdd-reject it 'timeout)))))
      :signal (lambda ()
                (if timer (cancel-timer timer))
-               (pdd-reject it 'abort))
+               (pdd-reject it 'cancel))
      (puthash timer it pdd-task--timer-pool))))
 
 ;;;###autoload
@@ -1105,7 +1141,7 @@ Examples:
 
   (setq t1 (pdd-delay 5 \"hello\"))
   (pdd-then t1 (lambda (r) (message r)))
-  (pdd-signal t1 \\='abort) ; the task can be cancelled by signal
+  (pdd-signal t1 \\='cancel) ; the task can be cancelled by signal
 
   (pdd-delay 3 (lambda () (message \"> %s\" (float-time))))"
   (declare (indent 1))
@@ -1122,7 +1158,7 @@ Examples:
                                  (error (pdd-reject it err))))))))
      :signal (lambda ()
                (if timer (cancel-timer timer))
-               (pdd-reject it 'abort))
+               (pdd-reject it 'cancel))
      (puthash timer it pdd-task--timer-pool))))
 
 ;;;###autoload
@@ -1182,7 +1218,7 @@ Example:
 
     ;; Cancel the task
     (setq task1 (pdd-interval ...))
-    (pdd-signal task1 \\='abort)"
+    (pdd-signal task1 \\='cancel)"
   (declare (indent 2))
   (pdd-with-new-task
    (let* ((n 0)
@@ -1212,8 +1248,8 @@ Example:
                              (when (functionp func)
                                (pdd-funcall func (list n return-fn timer)))))
                        (error (funcall return-fn err t))))))
+     :signal (lambda () (funcall return-fn 'cancel t))
      (setq it (pdd--wrap-task-handlers it done fail fine timer))
-     :signal (lambda () (funcall return-fn 'abort t))
      (puthash timer it pdd-task--timer-pool))))
 
 (defvar pdd--proc-send-need-newline '("tee" "echo"))
@@ -1405,8 +1441,8 @@ or return the result directly when SYNC is t."
                                             :filter filter-fn :sentinel sentinel-fn))
                    (funcall init-proc proc))
                (error (pdd-reject task (format "Process creation failed: %s" err) context)))
-             (setq it (pdd--wrap-task-handlers it done fail fine proc))
-             :signal signal-fn)))))))
+             :signal signal-fn
+             (setq it (pdd--wrap-task-handlers it done fail fine proc)))))))))
 
 ;; Async/Await
 
@@ -2684,7 +2720,7 @@ ARGS should a request instances or keywords to build the request."
                                  (setq final-buffer (current-buffer))
                                  (remove-hook 'after-change-functions #'pdd-url-http-extra-filter t)
                                  (remove-hook 'kill-buffer-hook #'pdd-url-migrate-status-to-redirect)
-                                 (pdd-log 'url-backend "URL-CALLBACK! flag: %s, timer: %s" abort-flag pdd-url-timeout-timer)
+                                 (pdd-log 'url-backend "URL-CALLBACK! flag: %s" abort-flag)
                                  (if abort-flag
                                      (pdd-log 'url-backend "skip done (aborted or timeout).")
                                    (condition-case err1
