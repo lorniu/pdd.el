@@ -9,7 +9,7 @@ Current issue:
 
 The only API is `pdd-exec`:
 ```
-(pdd-exec CMD &rest ARGS &key ENV AS PEEK INIT DONE FAIL FINE PIPE SYNC &allow-other-keys)
+(pdd-exec CMD &rest ARGS &key ENV AS PEEK INIT DONE FAIL FINE PIPE CACHE SYNC &allow-other-keys)
 
   CMD:     Executable name (string, list, vector or t)
            * if this is t, ARGS will be wrapped to shell command
@@ -22,14 +22,20 @@ The only API is `pdd-exec`:
            * If this is a function, use its return value as result
            * Otherwise, just return the process output literally
   INIT:    Post-creation callback (lambda (process))
-           * If TYPE is pipe, and this is a string, then send it to proc pipe
+           * If type is pipe, and this is a string, then send it to proc pipe
            * If this is a function, just do something to proc manually with it
   PEEK:    Function to call in filter (lambda (string process))
   DONE:    Success callback (lambda (output exit-status))
   FAIL:    Error handler (lambda (error-message))
   FINE:    Finalizer (lambda (process))
   PIPE:    If t, use pipe connection type for process explicitly
+  CACHE:   Enable cache support if this is not nil
+           * If this is a cacher instance, use configs in it
+           * If this is a number or function, use this as ttl
+           * If this is a cons cell, should be (ttl &optional key store)
   SYNC:    If t, execute synchronously. In this case `:peek' is ignored
+
+SYNC and FAIL can be dynamically bound with `pdd-sync' and `pdd-fail'.
 
 Return a ‘pdd-task’ object that can be canceled using ‘pdd-signal’ by default,
 or return the result directly when SYNC is t.
@@ -45,7 +51,7 @@ Smart cmd and args syntax:
 (pdd-exec [ls -a -r] :done #'print) ; vector is like list
 (pdd-exec "ls -a -r" :done #'print) ; shell command format string
 (pdd-exec t '(tee "~/aaa.txt") :init "pipe this to tee to save") ; t: execute as shell command
-(pdd-exec [ps aux] :sync t :pipe t) ; sync & pipe
+(pdd-exec [ps aux] :sync t :pipe t :cache 5) ; other keywords
 ```
 
 Bind extra proc environments:

@@ -79,4 +79,17 @@ A cacher instance always works behind:
   (pdd url :cache 666)  ; use a cacher with ttl 666 and storage my-hash-table
   (pdd url :cache '(5 (data . path) (store . "~/vvv/aaa"))) ; override all
   (pdd url :cache nil)) ; inhibit cache
+
+;; Function `pdd-exec' also support caching. Should enable explicitly with `:cache'
+;; Different: if value is cons cell, with at most 3 elements: (ttl &optional key store)
+
+(pdd-exec `(curl "https://httpbin.org/ip") :cache 5)
+(pdd-exec `(curl "https://httpbin.org/ip") :cache `(5 "curl-ip"))
+
+;; Use macro `pdd-with-cache' to add support for any Task or Data
+
+(pdd-with-cache (5 "pdd-and-curl-ip")
+  (pdd-all
+   (pdd-retrieve "https://httpbin.org/ip")
+   (pdd-exec `(curl "https://httpbin.org/ip")))))
 ```
