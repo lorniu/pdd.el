@@ -1,7 +1,7 @@
 # Integrate timers with pdd-task
 
 There are three functions integrated with timer:
-- `(pdd-expire time)`, reject with timeout after TIME
+- `(pdd-timeout time)`, reject with 'timeout after TIME
 - `(pdd-delay time &optional value)`, resolve with VALUE after TIME
 - `(pdd-interval secs count func ...)`, do some jobs intervally
 
@@ -12,7 +12,7 @@ Each of them return a `pdd-task` object which can chain with other tasks.
 Expire:
 ```emacs-lisp
 (pdd-race
- (pdd-expire 1.1)
+ (pdd-timeout 1.1)
  (pdd "https://httpbin.org/ip" #'print))
 ```
 

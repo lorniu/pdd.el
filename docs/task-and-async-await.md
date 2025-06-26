@@ -35,7 +35,7 @@ As you can see, the core functions are `pdd-task`, `pdd-resolve`, `pdd-reject` a
 *  `pdd-signal`: Sends a signal to a task, usually used to cancel a task as `(pdd-signal task 'cancel)`.
 *  `pdd-chain`: A convenience function built on `pdd-then` for simplifying sequential task chains.
 *  `pdd-all`, `pdd-any`, `pdd-race`: Manage multiple concurrent tasks.
-*  `pdd-delay`, `pdd-expire`, `pdd-interval`: Utilities integrating Emacs timers with tasks.
+*  `pdd-delay`, `pdd-timeout`, `pdd-interval`: Utilities integrating Emacs timers with tasks.
 
 There is also a *async/await* syntax sugar for more synchronous-looking style just like those in TS/C#:
 *  Wrap code with macro `pdd-async`, and use `await` to _wait for result asynchronously_.

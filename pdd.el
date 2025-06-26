@@ -902,7 +902,7 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
             (if (functionp signal-fn)
                 (pdd-funcall signal-fn (list signal target))
               ;; default signal for cancel
-              (pdd-reject target 'cancel))))))))
+              (pdd-reject target (or signal 'cancel)))))))))
 
 (defun pdd-task--settle (task status v)
   "Settle TASK to STATUS with V is value or reason."
@@ -1129,11 +1129,16 @@ NOTICE: variable `pdd-sync' always be nil in the inner context."
         (if fine (pdd-funcall fine (list fine-arg)))))))
 
 ;;;###autoload
-(defun pdd-expire (time)
+(defun pdd-timeout (time &optional task)
   "Create a new task that reject with timeout at time TIME.
+If TASK is not nil, reject it with timeout when timer triggered.
 TIME is same as the argument of `run-at-time'."
   (pdd-with-new-task
-   (let ((timer (run-at-time time nil (lambda () (pdd-reject it 'timeout)))))
+   (let ((timer (run-at-time time nil
+                             (lambda ()
+                               (when (pdd-task-p task)
+                                 (pdd-signal task 'cancel))
+                               (pdd-reject it 'timeout)))))
      :signal (lambda ()
                (if timer (cancel-timer timer))
                (pdd-reject it 'cancel))

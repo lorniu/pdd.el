@@ -20,7 +20,7 @@ Table of contents:
 - [How to set `proxy`](docs/proxy.md) | [How to manage `cookies`](docs/cookie-jar.md)
 - [How to use `cache`](docs/cacher.md) | [Control concurrency with `:queue`](docs/queue.md)
 - [The power of **Promise** and **Async/Await** `(pdd-task)`](docs/task-and-async-await.md)
-- [Integrate **timers** with task and request `(pdd-expire/delay/interval)`](docs/task-timers.md)
+- [Integrate **timers** with task and request `(pdd-timeout/delay/interval)`](docs/task-timers.md)
 - [Integrate **make-process** with task and request `(pdd-exec)`](docs/task-process.md)
 - [Compare: who is faster, url.el or plz.el?](docs/queue.md#example-who-is-faster-urlel-or-plzel)
 
