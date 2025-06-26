@@ -161,8 +161,8 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
     (should (equal (pdd-cacher-resolve-key c2 '(a b c)) "abc"))
     (should (equal (pdd-cacher-resolve-key c3 '(a b c)) '(1 a b c)))
     (should (equal (pdd-cacher-resolve-key c4 "hello.") "-hello."))
-    (should (equal (pdd-cacher-resolve-key c5 (pdd-request :backend pdd-backend :url "kk" :data '((a . 1) (b . 2)))) '(xxx 2)))
-    (should (equal (pdd-cacher-resolve-key c6 (pdd-request :backend pdd-backend :url "kk" :data '((a . 1) (b . 2)))) "f341eda5609d62686e569ef42819865b"))))
+    (should (equal (pdd-cacher-resolve-key c5 (pdd-http-request :backend pdd-backend :url "kk" :data '((a . 1) (b . 2)))) '(xxx 2)))
+    (should (equal (pdd-cacher-resolve-key c6 (pdd-http-request :backend pdd-backend :url "kk" :data '((a . 1) (b . 2)))) "f341eda5609d62686e569ef42819865b"))))
 
 (ert-deftest pdd-test-cacher-hashtable ()
   (let ((ht (make-hash-table :test #'equal)))
@@ -195,7 +195,7 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
   (let ((dir (make-temp-file "pdd-tests-cacher-" t)))
     (unwind-protect
         (let* ((ht (make-hash-table :test #'equal))
-               (req (pdd-request :backend pdd-backend :url "https://httpbin.org/ip" :data '((data . 1) (data . 2))))
+               (req (pdd-http-request :backend pdd-backend :url "https://httpbin.org/ip" :data '((data . 1) (data . 2))))
                (c1 (pdd-cacher :store ht :key '(xxx (data . b))))
                (c2 (pdd-cacher :store dir :key '(xxx (data . b)))))
           (should (pdd-cacher-put c1 req "hello1"))
@@ -318,7 +318,7 @@ test\r\n--666--" (let ((pdd-multipart-boundary "666")
             (pdd "/uuid"
               :done (lambda (rs) ())
               :fine (lambda (rs) (setq it rs))))
-          (cl-typep it #'pdd-request))
+          (cl-typep it #'pdd-http-request))
   (should (ignore-errors
             (pdd "/uuid"
               :done (lambda () (car--- r))
