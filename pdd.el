@@ -587,6 +587,8 @@ reorder the built-in transformers unless you fully understand the consequences."
 
 ;; Generic
 
+(defalias 'pdd 'pdd-retrieve)
+
 (defclass pdd-http-backend ()
   ((user-agent :initarg :user-agent
                :type (or string null))
@@ -595,7 +597,7 @@ reorder the built-in transformers unless you fully understand the consequences."
   "Used to send http request."
   :abstract t)
 
-(defclass pdd-request ()
+(defclass pdd-http-request ()
   ((url        :initarg :url         :type string)
    (method     :initarg :method      :type (or symbol string))
    (params     :initarg :params      :type (or string list))
@@ -625,26 +627,39 @@ reorder the built-in transformers unless you fully understand the consequences."
    (verbose    :initarg :verbose     :type (or function boolean)))
   "Abstract base class for HTTP request configs.")
 
-(cl-defgeneric pdd (url-or-backend &rest args &key
-                                   method
-                                   params
-                                   headers
-                                   data
-                                   init
-                                   peek
-                                   as
-                                   done
-                                   fail
-                                   fine
-                                   sync
-                                   timeout
-                                   max-retry
-                                   cookie-jar
-                                   proxy
-                                   cache
-                                   queue
-                                   verbose
-                                   &allow-other-keys)
+(defclass pdd-cacher ()
+  ((ttl :initarg :ttl
+        :type (or null number function symbol)
+        :documentation "Time-To-Live for cache entries in seconds.
+If nil, not expired. If number, keep live for this seconds.
+If function, use cache every time when this return t.")
+   (key :initarg :key
+        :documentation "Key or key strategy used for caching.")
+   (store :initarg :store
+          :documentation "The storage backend for this cacher.
+By default, this is an hash-table or a symbol whose value is a hash-table.
+This is also can be a directory string, that is, caching to local disk.")))
+
+(cl-defgeneric pdd-retrieve (url-or-backend &rest args &key
+                                            method
+                                            params
+                                            headers
+                                            data
+                                            init
+                                            peek
+                                            as
+                                            done
+                                            fail
+                                            fine
+                                            sync
+                                            timeout
+                                            max-retry
+                                            cookie-jar
+                                            proxy
+                                            cache
+                                            queue
+                                            verbose
+                                            &allow-other-keys)
   "Send an HTTP request using a specified backend.
 
 This function has two primary calling conventions:
@@ -751,7 +766,7 @@ Returns response data in sync mode, task object in async mode."
       (setq err `(user-error ,err))
     (when (eq (car err) 'error) ; avoid 'peculiar error'
       (setf (car err) 'user-error)))
-  (let ((prefix (or (and (cl-typep target 'pdd-request)
+  (let ((prefix (or (and (cl-typep target 'pdd-http-request)
                          (oref target abort-flag))
                     "unhandled error"))
         (errmsg (string-trim
@@ -2059,7 +2074,7 @@ Otherwise, delete only the item."
                                 (pdd-funcall rkey (list key cacher))
                               (cl-call-next-method cacher key))))
              (pdd-cacher-resolve-key real-store real-key)))
-  (:method ((cacher pdd-cacher) (request pdd-request))
+  (:method ((cacher pdd-cacher) (request pdd-http-request))
            (let ((rkey (oref cacher key))
                  (store (oref cacher store)))
              (when (functionp (car (ensure-list rkey)))
@@ -2092,7 +2107,7 @@ Otherwise, delete only the item."
   "Return the request transformers will be used by BACKEND."
   pdd-default-request-transformers)
 
-(cl-defmethod pdd-transform-req-init ((request pdd-request))
+(cl-defmethod pdd-transform-req-init ((request pdd-http-request))
   "Construct the :init callback handler for REQUEST."
   (with-slots (init) request
     (let ((init1 init))
@@ -2101,7 +2116,7 @@ Otherwise, delete only the item."
               (when init1
                 (pdd-funcall init1 (list request))))))))
 
-(cl-defmethod pdd-transform-req-done ((request pdd-request))
+(cl-defmethod pdd-transform-req-done ((request pdd-http-request))
   "Construct the :done callback handler for REQUEST."
   (with-slots (url done buffer) request
     (let* ((args (pdd-function-arguments done))
@@ -2133,7 +2148,7 @@ Otherwise, delete only the item."
                    (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
                    (ignore-errors (pdd-funcall (oref ,request-ref fine) (list ,request-ref))))))))))
 
-(cl-defmethod pdd-transform-req-peek ((request pdd-request))
+(cl-defmethod pdd-transform-req-peek ((request pdd-http-request))
   "Construct the :peek callback handler for REQUEST."
   (with-slots (peek fail abort-flag) request
     (let ((peek1 peek))
@@ -2158,7 +2173,7 @@ Otherwise, delete only the item."
                              (setf abort-flag 'peek)
                              (funcall fail err1)))))))))))
 
-(cl-defmethod pdd-transform-req-fail ((request pdd-request))
+(cl-defmethod pdd-transform-req-fail ((request pdd-http-request))
   "Construct the :fail callback handler for REQUEST."
   (with-slots (url max-retry fail fine abort-flag task queue backend) request
     (let ((fail-user fail)
@@ -2223,7 +2238,7 @@ Otherwise, delete only the item."
                     (if (and task queue) (ignore-errors (pdd-queue-release queue task)))
                     (ignore-errors (pdd-funcall fine (list request)))))))))))
 
-(cl-defmethod pdd-transform-req-headers ((request pdd-request))
+(cl-defmethod pdd-transform-req-headers ((request pdd-http-request))
   "Transform headers with stringfy and abbrev replacement in REQUEST."
   (with-slots (headers) request
     ;; append case
@@ -2249,7 +2264,7 @@ Otherwise, delete only the item."
                    do (push (cons k v) last-headers)
                    finally return (nreverse last-headers)))))
 
-(cl-defmethod pdd-transform-req-cookies ((request pdd-request))
+(cl-defmethod pdd-transform-req-cookies ((request pdd-http-request))
   "Add cookies from cookie jar to REQUEST headers."
   (with-slots (headers url cookie-jar) request
     (let ((jar (if (slot-boundp request 'cookie-jar) cookie-jar pdd-active-cookie-jar)))
@@ -2270,7 +2285,7 @@ Otherwise, delete only the item."
                          cookies "; "))
                   headers)))))))
 
-(cl-defmethod pdd-transform-req-data ((request pdd-request))
+(cl-defmethod pdd-transform-req-data ((request pdd-http-request))
   "Serialize data to raw string for REQUEST."
   (with-slots (headers data datas binaryp) request
     (setf datas
@@ -2293,7 +2308,7 @@ Otherwise, delete only the item."
                                "application/x-www-form-urlencoded"))
                        (pdd-object-to-string 'query data)))))))))
 
-(cl-defmethod pdd-transform-req-proxy ((request pdd-request))
+(cl-defmethod pdd-transform-req-proxy ((request pdd-http-request))
   "Parse proxy setting for current REQUEST."
   (let* ((backend (oref request backend))
          (proxy (cond ((slot-boundp request 'proxy)
@@ -2325,7 +2340,7 @@ Otherwise, delete only the item."
           (if pass (plist-put proxy :pass pass))))
       (oset request proxy proxy))))
 
-(cl-defmethod pdd-transform-req-cacher ((request pdd-request))
+(cl-defmethod pdd-transform-req-cacher ((request pdd-http-request))
   "Normalize cacher setting for current REQUEST.
 
 Examples:
@@ -2360,7 +2375,7 @@ Examples:
                                     key))))
                   (pdd-cacher :ttl ttl :key key :store store))))))))
 
-(cl-defmethod pdd-transform-req-others ((request pdd-request))
+(cl-defmethod pdd-transform-req-others ((request pdd-http-request))
   "Other changes should be made for REQUEST."
   (with-slots (headers datas binaryp backend) request
     (unless (assoc "User-Agent" headers #'pdd-ci-equal)
@@ -2368,7 +2383,7 @@ Examples:
     (when (and (not binaryp) datas)
       (setf binaryp (not (multibyte-string-p datas))))))
 
-(cl-defmethod pdd-transform-req-verbose ((request pdd-request))
+(cl-defmethod pdd-transform-req-verbose ((request pdd-http-request))
   "Request output in verbose mode for REQUEST.
 Delay the logic after :init to avoid unnecessary output."
   (with-slots (verbose url method datas headers buffer init) request
@@ -2390,13 +2405,13 @@ Delay the logic after :init to avoid unnecessary output."
   "Instance request object for BACKEND."
   (:method ((backend pdd-http-backend) &rest args)
            (let* ((url (pop args)) ; ignore the invalid args when building request instance
-                  (slots (mapcar #'eieio-slot-descriptor-name (eieio-class-slots 'pdd-request)))
+                  (slots (mapcar #'eieio-slot-descriptor-name (eieio-class-slots 'pdd-http-request)))
                   (vargs (cl-loop for (k v) on args by #'cddr
                                   if (memq (intern (substring (symbol-name k) 1)) slots)
                                   append (list k v))))
-             (apply #'pdd-request `(:backend ,backend :url ,url ,@vargs)))))
+             (apply #'pdd-http-request `(:backend ,backend :url ,url ,@vargs)))))
 
-(cl-defmethod initialize-instance :after ((request pdd-request) &rest _)
+(cl-defmethod initialize-instance :after ((request pdd-http-request) &rest _)
   "Initialize the configs for REQUEST."
   (pdd-log 'req "initialize-instance...")
   (with-slots (url method params headers data peek done fail fine timeout max-retry cache queue sync abort-flag buffer backend task verbose) request
@@ -2438,7 +2453,7 @@ Delay the logic after :init to avoid unnecessary output."
              do (pdd-log 'req ".%s" (symbol-name transformer))
              do (funcall transformer request))))
 
-(cl-defmethod pdd :around ((backend pdd-http-backend) &rest args)
+(cl-defmethod pdd-retrieve :around ((backend pdd-http-backend) &rest args)
   "The common logics before or after the http request for BACKEND.
 ARGS should a request instances or keywords to build the request."
   (let (request)
@@ -2446,7 +2461,7 @@ ARGS should a request instances or keywords to build the request."
         (progn
           (pdd-log 'pdd:around "make request...")
           (setq request
-                (if (cl-typep (car args) 'pdd-request)
+                (if (cl-typep (car args) 'pdd-http-request)
                     (car args)
                   (apply #'pdd-make-request backend args)))
           (with-slots (sync init process task queue cache abort-flag begtime) request
@@ -2597,7 +2612,7 @@ ARGS should a request instances or keywords to build the request."
 (defvar-local pdd-url-timeout-timer nil)
 (defvar pdd-url-inhibit-proxy-fallback nil)
 
-(cl-defmethod pdd-proxy-vars ((_ pdd-url-backend) (request pdd-request))
+(cl-defmethod pdd-proxy-vars ((_ pdd-url-backend) (request pdd-http-request))
   "Serialize proxy config for url REQUEST."
   (with-slots (proxy) request
     (when proxy
@@ -2618,7 +2633,7 @@ ARGS should a request instances or keywords to build the request."
                   (if (and user pass) (format "%s:%s@" user pass) "")
                   host port))))))
 
-(cl-defmethod pdd-transform-error ((_ pdd-url-backend) (request pdd-request) status)
+(cl-defmethod pdd-transform-error ((_ pdd-url-backend) (request pdd-http-request) status)
   "Extract error object from callback STATUS for REQUEST."
   (with-slots (url abort-flag) request
     (cond ((plist-get status :error)
@@ -2665,7 +2680,7 @@ ARGS should a request instances or keywords to build the request."
   (remove-hook 'before-change-functions #'pdd-url-cancel-timeout-timer t)
   (ignore-errors (cancel-timer pdd-url-timeout-timer)))
 
-(cl-defmethod pdd ((backend pdd-url-backend) &key request)
+(cl-defmethod pdd-retrieve ((backend pdd-url-backend) &key request)
   "Send REQUEST with url.el as BACKEND."
   (with-slots (url method headers datas binaryp resp peek done fail timeout sync abort-flag) request
     ;; setup proxy
@@ -2809,12 +2824,12 @@ ARGS should a request instances or keywords to build the request."
 (declare-function plz-response-status "ext:plz.el" t t)
 (declare-function plz-response-body "ext:plz.el" t t)
 
-(cl-defmethod pdd :before ((_ pdd-curl-backend) &rest _)
+(cl-defmethod pdd-retrieve :before ((_ pdd-curl-backend) &rest _)
   "Check if `plz.el' is available."
   (unless (and (require 'plz nil t) (executable-find plz-curl-program))
     (error "You should have `plz.el' and `curl' installed before using `pdd-curl-backend'")))
 
-(cl-defmethod pdd-proxy-vars ((_ pdd-curl-backend) (request pdd-request))
+(cl-defmethod pdd-proxy-vars ((_ pdd-curl-backend) (request pdd-http-request))
   "Return proxy configs for plz REQUEST."
   (with-slots (proxy) request
     (when proxy
@@ -2823,7 +2838,7 @@ ARGS should a request instances or keywords to build the request."
           ,@(when (and user pass)
               `("--proxy-user" ,(format "%s:%s" user pass))))))))
 
-(cl-defmethod pdd-transform-error ((_ pdd-curl-backend) (_ pdd-request) error)
+(cl-defmethod pdd-transform-error ((_ pdd-curl-backend) (_ pdd-http-request) error)
   "Hacky, but try to unify the ERROR data format with url.el."
   (when (and (consp error) (memq (car error) '(plz-http-error plz-curl-error)))
     (setq error (caddr error)))
@@ -2848,7 +2863,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
                   code)
           error)))))
 
-(cl-defmethod pdd ((backend pdd-curl-backend) &key request)
+(cl-defmethod pdd-retrieve ((backend pdd-curl-backend) &key request)
   "Send REQUEST with plz as BACKEND."
   (with-slots (url method headers datas binaryp resp peek done fail timeout sync abort-flag) request
     (let* ((tag (eieio-object-class backend))
@@ -2965,7 +2980,7 @@ ARGS should be the arguments of function `pdd'."
            ,@(if params `(:params ,params)) ,@(if data `(:data ,data)) ,@lst)))
 
 ;;;###autoload
-(cl-defmethod pdd (&rest args)
+(cl-defmethod pdd-retrieve (&rest args)
   "Send an HTTP request using the `pdd-backend'.
 
 This is a convenience method that uses the default backend instead of
