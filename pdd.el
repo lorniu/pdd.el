@@ -102,6 +102,57 @@
   :group 'network
   :prefix 'pdd-)
 
+(defclass pdd-http-backend ()
+  ((user-agent :initarg :user-agent
+               :type (or string null))
+   (proxy :initarg :proxy
+          :type (or string function null)))
+  "Used to send http request."
+  :abstract t)
+
+(defclass pdd-http-request ()
+  ((url        :initarg :url         :type string)
+   (method     :initarg :method      :type (or symbol string))
+   (params     :initarg :params      :type (or string list))
+   (headers    :initarg :headers     :type list)
+   (data       :initarg :data        :type (or function string list))
+   (datas      :initform nil         :type (or string null))
+   (binaryp    :initform nil         :type boolean)
+   (init       :initarg :init        :type (or function null) :initform nil)
+   (as         :initarg :as          :type (or function symbol null) :initform nil)
+   (peek       :initarg :peek        :type (or function null))
+   (done       :initarg :done        :type (or function null))
+   (fail       :initarg :fail        :type (or function null t))
+   (fine       :initarg :fine        :type (or function null))
+   (sync       :initarg :sync)
+   (timeout    :initarg :timeout     :type (or number null))
+   (max-retry  :initarg :max-retry   :type (or number null))
+   (proxy      :initarg :proxy       :type (or string list null))
+   (cache      :initarg :cache       :type (or pdd-cacher number list function null t))
+   (queue      :initarg :queue       :type (or pdd-queue null))
+   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null))
+   (buffer     :initarg :buffer      :initform nil)
+   (process    :initarg :process     :initform nil)
+   (task       :initarg :task        :initform nil)
+   (backend    :initarg :backend     :type (or pdd-http-backend null))
+   (abort-flag :initarg :abort-flag  :initform nil)
+   (begtime    :type (or null float))
+   (verbose    :initarg :verbose     :type (or function boolean)))
+  "Abstract base class for HTTP request configs.")
+
+(defclass pdd-cacher ()
+  ((ttl :initarg :ttl
+        :type (or null number function symbol)
+        :documentation "Time-To-Live for cache entries in seconds.
+If nil, not expired. If number, keep live for this seconds.
+If function, use cache every time when this return t.")
+   (key :initarg :key
+        :documentation "Key or key strategy used for caching.")
+   (store :initarg :store
+          :documentation "The storage backend for this cacher.
+By default, this is an hash-table or a symbol whose value is a hash-table.
+This is also can be a directory string, that is, caching to local disk.")))
+
 (defcustom pdd-debug nil
   "Debug flag."
   :type '(choice boolean symbol))
@@ -136,24 +187,67 @@ non-nil then redirect the output to this function instead."
 
 (defconst pdd-shared-request-storage (make-hash-table :test 'equal))
 
-(defmacro pdd-with-common-cacher (key &rest body)
-  "Execute BODY and cache its result under KEY."
+(cl-defmacro pdd-with-cache (cache &rest body)
+  "Execute BODY with caching mechanism.
+
+CACHE specifies the cache key or settings. Optional keyword args:
+
+:common - cache to common storage (defaults to `pdd-shared-common-storage')
+:fallback-key - Fallback key when no key is specified in CACHE.
+
+The macro handles both simple hash-table caching and more complex
+caching scenarios using cacher objects. Returns cached value
+if available, otherwise executes BODY and stores the result."
   (declare (indent 1))
-  (let ((keysmb (gensym)) (valsmb (gensym)) (cache (gensym)))
-    `(let* ((,keysmb ,key)
-            (,cache (gethash ,keysmb pdd-shared-common-storage 'no-x-cache)))
-       (if (not (eq ,cache 'no-x-cache))
-           ,cache
-         (let ((,valsmb (progn ,@body)))
-           (puthash ,keysmb ,valsmb pdd-shared-common-storage)
-           ,valsmb)))))
+  (let (common fallback-key (cache-sym (gensym)))
+    (while (keywordp (car body))
+      (let ((k (pop body)) (v (pop body)))
+        (pcase k
+          (:common (setq common v))
+          (:fallback-key (setq fallback-key v)))))
+    (if common
+        (let ((keysmb (gensym)) (valsmb (gensym)))
+          (if (eq common t) (setq common 'pdd-shared-common-storage))
+          `(let* ((,keysmb ,cache)
+                  (,cache-sym (gethash ,keysmb ,common 'no-x-cache)))
+             (if (not (eq ,cache-sym 'no-x-cache))
+                 ,cache-sym
+               (let ((,valsmb (progn ,@body)))
+                 (puthash ,keysmb ,valsmb ,common)
+                 ,valsmb))))
+      (let ((cacher-sym (gensym)))
+        `(let (,cacher-sym (,cache-sym ,cache))
+           (when ,cache-sym
+             (setq ,cacher-sym (if (pdd-cacher-p ,cache-sym) ,cache-sym (pdd-cacher)))
+             (if (or (functionp ,cache-sym) (numberp ,cache-sym))
+                 (oset ,cacher-sym ttl ,cache-sym)
+               (when (consp ,cache-sym)
+                 (unless (eq t (car ,cache-sym))
+                   (oset ,cacher-sym ttl (car ,cache-sym)))
+                 (when-let* ((k (cadr ,cache-sym)))
+                   (oset ,cacher-sym key k))
+                 (when-let* ((s (caddr ,cache-sym)))
+                   (oset ,cacher-sym store s))))
+             (unless (oref ,cacher-sym key)
+               (oset ,cacher-sym key ,fallback-key))
+             (unless (oref ,cacher-sym key)
+               (user-error "Caching key not found, maybe should provide with :fallback-key")))
+           (or (and ,cacher-sym (pdd-cacher-get ,cacher-sym nil))
+               (let ((result (progn ,@body)))
+                 (when ,cacher-sym
+                   (if (pdd-task-p result)
+                       (pdd-then result
+                         (lambda (r) (pdd-cacher-put ,cacher-sym nil (pdd-resolve r))))
+                     (pdd-cacher-put ,cacher-sym nil result)))
+                 result)))))))
 
 ;; Utils
 
 (defun pdd-detect-charset (content-type)
   "Detect charset from CONTENT-TYPE header."
   (when content-type
-    (pdd-with-common-cacher (cons 'charset content-type)
+    (pdd-with-cache (cons 'charset content-type)
+      :common t
       (setq content-type (downcase (format "%s" content-type)))
       (if (string-match "charset=\\s-*\\([^; \t\n\r]+\\)" content-type)
           (intern (match-string 1 content-type))
@@ -162,7 +256,8 @@ non-nil then redirect the output to this function instead."
 (defun pdd-binary-type-p (content-type)
   "Check if current CONTENT-TYPE represents binary data."
   (when content-type
-    (pdd-with-common-cacher (cons 'binaryp content-type)
+    (pdd-with-cache (cons 'binaryp content-type)
+      :common t
       (cl-destructuring-bind (mime sub)
           (split-string content-type "/" nil "[ \n\r\t]")
         (not (or (equal mime "text")
@@ -247,7 +342,8 @@ If FROM-END-P, search from end."
 
 (defun pdd-generic-parse-url (url)
   "Return an URL-struct of the parts of URL with cache support."
-  (pdd-with-common-cacher (list 'url-obj url)
+  (pdd-with-cache (list 'url-obj url)
+    :common t
     (when (> (hash-table-count pdd-shared-common-storage) 1234)
       (clrhash pdd-shared-common-storage))
     (url-generic-parse-url url)))
@@ -260,7 +356,8 @@ Supports formats like:
   https://example.com:8080
   socks5://user:pass@127.0.0.1:1080"
   (cl-assert (stringp proxy-url))
-  (pdd-with-common-cacher (cons 'parse-proxy-url proxy-url)
+  (pdd-with-cache (cons 'parse-proxy-url proxy-url)
+    :common t
     (let* ((url (url-generic-parse-url proxy-url))
            (type (intern (url-type url)))
            (host (url-host url))
@@ -349,7 +446,8 @@ Return a plist containing all cookie attributes."
 
 (defun pdd-function-arglist (function)
   "Get signature of FUNCTION with cache enabled."
-  (pdd-with-common-cacher (list 'signature function)
+  (pdd-with-cache (list 'signature function)
+    :common t
     (cond
      ((eq (car-safe function) 'lambda) (cadr function))
      ((byte-code-function-p function)
@@ -587,59 +685,6 @@ reorder the built-in transformers unless you fully understand the consequences."
 
 ;; Generic
 
-(defalias 'pdd 'pdd-retrieve)
-
-(defclass pdd-http-backend ()
-  ((user-agent :initarg :user-agent
-               :type (or string null))
-   (proxy :initarg :proxy
-          :type (or string function null)))
-  "Used to send http request."
-  :abstract t)
-
-(defclass pdd-http-request ()
-  ((url        :initarg :url         :type string)
-   (method     :initarg :method      :type (or symbol string))
-   (params     :initarg :params      :type (or string list))
-   (headers    :initarg :headers     :type list)
-   (data       :initarg :data        :type (or function string list))
-   (datas      :initform nil         :type (or string null))
-   (binaryp    :initform nil         :type boolean)
-   (init       :initarg :init        :type (or function null) :initform nil)
-   (as         :initarg :as          :type (or function symbol null) :initform nil)
-   (peek       :initarg :peek        :type (or function null))
-   (done       :initarg :done        :type (or function null))
-   (fail       :initarg :fail        :type (or function null t))
-   (fine       :initarg :fine        :type (or function null))
-   (sync       :initarg :sync)
-   (timeout    :initarg :timeout     :type (or number null))
-   (max-retry  :initarg :max-retry   :type (or number null))
-   (proxy      :initarg :proxy       :type (or string list null))
-   (cache      :initarg :cache       :type (or pdd-cacher number list function null t))
-   (queue      :initarg :queue       :type (or pdd-queue null))
-   (cookie-jar :initarg :cookie-jar  :type (or pdd-cookie-jar function null))
-   (buffer     :initarg :buffer      :initform nil)
-   (process    :initarg :process     :initform nil)
-   (task       :initarg :task        :initform nil)
-   (backend    :initarg :backend     :type (or pdd-http-backend null))
-   (abort-flag :initarg :abort-flag  :initform nil)
-   (begtime    :type (or null float))
-   (verbose    :initarg :verbose     :type (or function boolean)))
-  "Abstract base class for HTTP request configs.")
-
-(defclass pdd-cacher ()
-  ((ttl :initarg :ttl
-        :type (or null number function symbol)
-        :documentation "Time-To-Live for cache entries in seconds.
-If nil, not expired. If number, keep live for this seconds.
-If function, use cache every time when this return t.")
-   (key :initarg :key
-        :documentation "Key or key strategy used for caching.")
-   (store :initarg :store
-          :documentation "The storage backend for this cacher.
-By default, this is an hash-table or a symbol whose value is a hash-table.
-This is also can be a directory string, that is, caching to local disk.")))
-
 (cl-defgeneric pdd-retrieve (url-or-backend &rest args &key
                                             method
                                             params
@@ -715,6 +760,8 @@ This function has two primary calling conventions:
 
 Returns response data in sync mode, task object in async mode."
   (declare (indent 1)))
+
+(defalias 'pdd 'pdd-retrieve)
 
 (eval-and-compile
   (defconst pdd--dynamic-context-vars
@@ -1121,7 +1168,7 @@ NOTICE: variable `pdd-sync' always be nil in the inner context."
              (if ,fine (pdd-funcall ,fine (list ,fine-arg)))))))
     (lambda (reason &optional context)
       (unwind-protect
-          (if fail
+          (if (functionp fail)
               (pdd-funcall fail (list reason context))
             (if (consp reason)
                 (signal (car reason) (cdr reason))
@@ -1272,10 +1319,8 @@ Example:
      (setq it (pdd--wrap-task-handlers it done fail fine timer))
      (puthash timer it pdd-task--timer-pool))))
 
-(defvar pdd--proc-send-need-newline '("tee" "echo"))
-
 ;;;###autoload
-(cl-defun pdd-exec (cmd &rest args &key env as peek init done fail fine pipe sync &allow-other-keys)
+(cl-defun pdd-exec (cmd &rest args &key env as peek init done fail fine pipe cache sync &allow-other-keys)
   "Create a promise-based task for CMD or run CMD synchronously.
 
 Arguments:
@@ -1291,14 +1336,20 @@ Arguments:
            * If this is a function, use its return value as result
            * Otherwise, just return the process output literally
   INIT:    Post-creation callback (lambda (process))
-           * If TYPE is pipe, and this is a string, then send it to proc pipe
+           * If type is pipe, and this is a string, then send it to proc pipe
            * If this is a function, just do something to proc manually with it
   PEEK:    Function to call in filter (lambda (string process))
   DONE:    Success callback (lambda (output exit-status))
   FAIL:    Error handler (lambda (error-message))
   FINE:    Finalizer (lambda (process))
   PIPE:    If t, use pipe connection type for process explicitly
+  CACHE:   Enable cache support if this is not nil
+           * If this is a cacher instance, use configs in it
+           * If this is a number or function, use this as ttl
+           * If this is a cons cell, should be (ttl &optional key store)
   SYNC:    If t, execute synchronously. In this case `:peek' is ignored
+
+SYNC and FAIL can be dynamically bound with `pdd-sync' and `pdd-fail'.
 
 Smart cmd and args syntax:
 
@@ -1310,7 +1361,7 @@ Smart cmd and args syntax:
   (pdd-exec [ls -a -r] :done #\\='print) ; vector is like list
   (pdd-exec \"ls -a -r\" :done #\\='print) ; shell command format string
   (pdd-exec t \\='(tee \"~/aaa.txt\") :init \"pipe this to tee to save\")
-  (pdd-exec [ps aux] :sync t :pipe t) ; sync & pipe
+  (pdd-exec [ps aux] :sync t :pipe t :cache 5) ; other keywords
 
 Bind extra proc environments:
 
@@ -1341,128 +1392,137 @@ Play with task system:
 Return a ‘pdd-task’ object that can be canceled using ‘pdd-signal’ by default,
 or return the result directly when SYNC is t."
   (declare (indent defun))
-  (ignore env as peek init done fail fine pipe sync) ; parse from args later, add this to silence linter
+  (ignore env as peek init done fail fine pipe cache sync) ; parse from args later, add this to silence linter
   (let (cmd-args keywords program)
+
     ;; parse arguments, cl-defun is different from common lisp defun
     (cl-loop for arg in (cons cmd args) for i from -1
              until (keywordp arg)
              append (if (or (vectorp arg) (consp arg))
                         (mapcar (lambda (s)
-                                  (if (or (stringp s) (memq s '(nil t)))
-                                      s
-                                    (format "%s" s)))
+                                  (if (or (stringp s) (memq s '(nil t))) s (format "%s" s)))
                                 arg)
                       (if (memq arg '(nil t))
                           (list arg)
                         (split-string-shell-command (format "%s" arg))))
-             into lst finally (setq cmd-args lst keywords (cl-subseq args i)))
-    (if (eq (car cmd-args) t) ; shell-command
-        (setq program (cadr cmd-args)
-              cmd-args (list shell-file-name shell-command-switch
-                             (mapconcat #'identity (cdr cmd-args) " ")))
-      (setq program (car cmd-args)))
-    (cl-destructuring-bind (&key env as peek init done fail fine pipe sync &allow-other-keys) keywords
+             into lst finally
+             (progn
+               (setq cmd-args lst
+                     keywords (cl-subseq args i))
+               (if (eq (car cmd-args) t) ; first t representing shell-command
+                   (setq program (cadr cmd-args)
+                         cmd-args (list shell-file-name shell-command-switch
+                                        (mapconcat #'identity (cdr cmd-args) " ")))
+                 (setq program (car cmd-args)))))
+
+    (cl-destructuring-bind (&key env as peek init done fail fine pipe cache sync &allow-other-keys) keywords
       (unless (memq :sync args) (setq sync pdd-sync))
-      (let* ((proc-name (format "pdd-proc-%s-%s" program (+ 10000 (random 10000))))
-             (proc-buffer (generate-new-buffer (format " *%s*" proc-name)))
-             (proc-envs (cl-loop for item in (ensure-list env)
-                                 if (consp item)
-                                 collect (format "%s=%s"
-                                                 (upcase (format "%s" (car item)))
-                                                 (string-join (ensure-list (cdr item)) path-separator))
-                                 if (stringp item) collect item))
-             (process-environment (append proc-envs process-environment))
-             (process-connection-type (if (memq :pipe args)
-                                          (if pipe nil t)
-                                        process-connection-type))
-             (init-proc (lambda (proc)
-                          (when init
-                            (if (functionp init)
-                                (pdd-funcall init (list proc))
-                              (let* ((str (if (stringp init) init (format "%s" init)))
-                                     ;; tee and some same processes will hang when no newline append at last
-                                     ;; i don't know if there is better way to resolve this
-                                     (str (concat str (if (member program pdd--proc-send-need-newline) "\n"))))
-                                (process-send-string proc str)
-                                (process-send-eof proc))))))
-             (as-line-fn (lambda ()
-                           (with-current-buffer proc-buffer
-                             (let (lines)
-                               (save-excursion
-                                 (goto-char (point-min))
-                                 (while (not (eobp))
-                                   (push (buffer-substring-no-properties (line-beginning-position) (line-end-position)) lines)
-                                   (forward-line 1))
-                                 (nreverse lines)))))))
-        (if (eq sync t)
-            ;; --- Synchronous ---
-            (let (proc result)
-              (unwind-protect
-                  (progn
-                    (pdd-log 'cmd "SYNC %s: %s %s" proc-name cmd-args proc-envs)
-                    (setq proc (apply #'start-process proc-name proc-buffer program (cdr cmd-args)))
-                    (funcall init-proc proc)
-                    (while (accept-process-output proc))
-                    (let ((exit-status (process-exit-status proc)))
-                      (if (and exit-status (= exit-status 0))
-                          (let ((raw (with-current-buffer proc-buffer
-                                       (cond ((eq as 'line) (funcall as-line-fn))
-                                             ((functionp as) (funcall as))
-                                             (t (buffer-string))))))
-                            (setq result (if done (pdd-funcall done (list raw exit-status)) raw)))
-                        (let ((reason (format "Process %s exited with status %d: %s"
-                                              program exit-status (with-current-buffer proc-buffer (buffer-string)))))
-                          (if fail (setq result (pdd-funcall fail (list reason))) (error "%s" reason))))))
-                (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
-                (when (and proc (process-live-p proc)) (delete-process proc))
-                (if fine (pdd-funcall fine (list proc))))
-              result)
-          ;; --- Asynchronous ---
-          (pdd-with-new-task
-           (let* ((task it) (proc nil) (killed-by-user nil) (exit-status nil)
-                  (context (pdd--capture-dynamic-context))
-                  (signal-fn (lambda (sig)
-                               (when (eq sig 'cancel)
-                                 (setq killed-by-user t)
-                                 (when (process-live-p proc)
-                                   (delete-process proc)))))
-                  (filter-fn (lambda (p string)
-                               (with-current-buffer (process-buffer p)
-                                 (insert (ansi-color-apply string))
-                                 (if peek (pdd-funcall peek (list string p))))))
-                  (sentinel-fn (lambda (p event)
+      (unless (memq :fail args) (setq fail pdd-fail))
+
+      ;; with cache support
+      (pdd-with-cache cache
+        :fallback-key (list 'pdd-exec program
+                            (secure-hash 'md5 (prin1-to-string (list cmd-args (unless (functionp init) init) as env))))
+
+        (let* ((proc-name (format "pdd-proc-%s-%s" program (+ 10000 (random 10000))))
+               (proc-buffer (generate-new-buffer (format " *%s*" proc-name)))
+               (proc-envs (cl-loop for item in (ensure-list env)
+                                   if (consp item)
+                                   collect (format "%s=%s"
+                                                   (upcase (format "%s" (car item)))
+                                                   (string-join (ensure-list (cdr item)) path-separator))
+                                   if (stringp item) collect item))
+               (process-environment (append proc-envs process-environment))
+               (process-connection-type (if (memq :pipe args)
+                                            (if pipe nil t)
+                                          process-connection-type))
+               (init-proc (lambda (proc)
+                            (when init
+                              (if (functionp init)
+                                  (pdd-funcall init (list proc))
+                                (let ((str (if (stringp init) init (format "%s" init))))
+                                  (process-send-string proc str)
+                                  (process-send-eof proc))))))
+               (as-line-fn (lambda ()
+                             (with-current-buffer proc-buffer
+                               (let (lines)
+                                 (save-excursion
+                                   (goto-char (point-min))
+                                   (while (not (eobp))
+                                     (push (buffer-substring-no-properties (line-beginning-position) (line-end-position)) lines)
+                                     (forward-line 1))
+                                   (nreverse lines)))))))
+
+          (if (eq sync t)
+              ;; --- Synchronous ---
+              (let (proc result)
+                (unwind-protect
+                    (progn
+                      (pdd-log 'cmd "SYNC %s: %s %s" proc-name cmd-args proc-envs)
+                      (setq proc (apply #'start-process proc-name proc-buffer program (cdr cmd-args)))
+                      (funcall init-proc proc)
+                      (while (accept-process-output proc))
+                      (let ((exit-status (process-exit-status proc)))
+                        (if (and exit-status (= exit-status 0))
+                            (let ((raw (with-current-buffer proc-buffer
+                                         (cond ((eq as 'line) (funcall as-line-fn))
+                                               ((functionp as) (funcall as))
+                                               (t (buffer-string))))))
+                              (setq result (if done (pdd-funcall done (list raw exit-status)) raw)))
+                          (let ((reason (format "Process %s exited with status %d: %s"
+                                                program exit-status (with-current-buffer proc-buffer (buffer-string)))))
+                            (if (functionp fail) (setq result (pdd-funcall fail (list reason))) (error "%s" reason))))))
+                  (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
+                  (when (and proc (process-live-p proc)) (delete-process proc))
+                  (if fine (pdd-funcall fine (list proc))))
+                result)
+
+            ;; --- Asynchronous ---
+            (pdd-with-new-task
+             (let* ((task it) (proc nil) (killed-by-user nil) (exit-status nil)
+                    (context (pdd--capture-dynamic-context))
+                    (signal-fn (lambda (sig)
+                                 (when (eq sig 'cancel)
+                                   (setq killed-by-user t)
+                                   (when (process-live-p proc)
+                                     (delete-process proc)))))
+                    (filter-fn (lambda (p string)
                                  (with-current-buffer (process-buffer p)
-                                   (pdd-log 'cmd "event: %s" event)
-                                   (unwind-protect
-                                       (progn
-                                         (cond
-                                          ((string-prefix-p "exited abnormally" event)
-                                           (setq exit-status (process-exit-status p)))
-                                          ((string= event "finished\n")
-                                           (setq exit-status 0)))
-                                         (cond
-                                          (killed-by-user
-                                           (pdd-reject task 'process-canceled context))
-                                          ((and exit-status (/= exit-status 0))
-                                           (pdd-reject task (format "Exit %d. %s" exit-status (buffer-string)) context))
-                                          (t
-                                           (pdd--with-restored-dynamic-context context
-                                             (let ((res (cond ((eq as 'line) (funcall as-line-fn))
-                                                              ((functionp as) (funcall as))
-                                                              (t (buffer-string)))))
-                                               (pdd-resolve task res exit-status))))))
-                                     (when (buffer-live-p (current-buffer))
-                                       (kill-buffer (current-buffer)))
-                                     (if fine (pdd-funcall fine (list proc))))))))
-             (condition-case err
-                 (progn
-                   (pdd-log 'cmd "%s: %s %s" proc-name cmd-args proc-envs)
-                   (setq proc (make-process :name proc-name :command cmd-args :buffer proc-buffer
-                                            :filter filter-fn :sentinel sentinel-fn))
-                   (funcall init-proc proc))
-               (error (pdd-reject task (format "Process creation failed: %s" err) context)))
-             :signal signal-fn
-             (setq it (pdd--wrap-task-handlers it done fail fine proc)))))))))
+                                   (insert (ansi-color-apply string))
+                                   (if peek (pdd-funcall peek (list string p))))))
+                    (sentinel-fn (lambda (p event)
+                                   (with-current-buffer (process-buffer p)
+                                     (pdd-log 'cmd "event: %s" event)
+                                     (unwind-protect
+                                         (progn
+                                           (cond
+                                            ((string-prefix-p "exited abnormally" event)
+                                             (setq exit-status (process-exit-status p)))
+                                            ((string= event "finished\n")
+                                             (setq exit-status 0)))
+                                           (cond
+                                            (killed-by-user
+                                             (pdd-reject task 'process-canceled context))
+                                            ((and exit-status (/= exit-status 0))
+                                             (pdd-reject task (format "Exit %d. %s" exit-status (buffer-string)) context))
+                                            (t
+                                             (pdd--with-restored-dynamic-context context
+                                               (let ((result (cond ((eq as 'line) (funcall as-line-fn))
+                                                                   ((functionp as) (funcall as))
+                                                                   (t (buffer-string)))))
+                                                 (pdd-resolve task result exit-status))))))
+                                       (when (buffer-live-p (current-buffer))
+                                         (kill-buffer (current-buffer)))
+                                       (if fine (pdd-funcall fine (list proc))))))))
+               (condition-case err
+                   (progn
+                     (pdd-log 'cmd "%s: %s %s" proc-name cmd-args proc-envs)
+                     (setq proc (make-process :name proc-name :command cmd-args :buffer proc-buffer
+                                              :filter filter-fn :sentinel sentinel-fn))
+                     (funcall init-proc proc))
+                 (error (pdd-reject task (format "Process creation failed: %s" err) context)))
+               :signal signal-fn
+               (setq it (pdd--wrap-task-handlers it done fail fine proc))))))))))
 
 ;; Async/Await
 
@@ -1889,19 +1949,6 @@ If JAR is nil, operates on the default cookie jar."
 
 ;; Cacher
 
-(defclass pdd-cacher ()
-  ((ttl :initarg :ttl
-        :type (or null number function symbol)
-        :documentation "Time-To-Live for cache entries in seconds.
-If nil, not expired. If number, keep live for this seconds.
-If function, use cache every time when this return t.")
-   (key :initarg :key
-        :documentation "Key or key strategy used for caching.")
-   (store :initarg :store
-          :documentation "The storage backend for this cacher.
-By default, this is an hash-table or a symbol whose value is a hash-table.
-This is also can be a directory string, that is, caching to local disk.")))
-
 (cl-defmethod initialize-instance :after ((cacher pdd-cacher) &rest _)
   "Initialize CACHER."
   (unless (slot-boundp cacher 'ttl)
@@ -2077,7 +2124,7 @@ Otherwise, delete only the item."
                                 store))
                   (real-key (if (functionp rkey) ; override the default logic
                                 (pdd-funcall rkey (list key cacher))
-                              (cl-call-next-method cacher key))))
+                              (or key rkey))))
              (pdd-cacher-resolve-key real-store real-key)))
   (:method ((cacher pdd-cacher) (request pdd-http-request))
            (let ((rkey (oref cacher key))
@@ -2255,7 +2302,8 @@ Otherwise, delete only the item."
                    do (setq item (ensure-list item))
                    if (and (symbolp (car item))
                            (or (null (cdr item)) (car-safe (cdr item))))
-                   collect (when-let* ((rule (pdd-with-common-cacher (list 'rewrite item)
+                   collect (when-let* ((rule (pdd-with-cache (list 'rewrite item)
+                                               :common t
                                                (alist-get (car item) pdd-header-rewrite-rules))))
                              (cons (car rule) (apply #'format (cdr rule) (cdr item))))
                    else collect item))
