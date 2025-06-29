@@ -1198,6 +1198,7 @@ TIME is same as the argument of `run-at-time'."
 Arguments:
 
   TIME:  Same as the first argument of `run-at-time'
+         * Special case when this is t, pending forever until a signal reached
   VALUE: Optional value to resolve with (can be a function)
 
 Returns:
@@ -1212,21 +1213,29 @@ Examples:
 
   (pdd-delay 3 (lambda () (message \"> %s\" (float-time))))"
   (declare (indent 1))
-  (pdd-with-new-task
-   (let* ((context (pdd--capture-dynamic-context))
-          (timer (run-at-time
-                  time nil (lambda ()
-                             (pdd--with-restored-dynamic-context context
-                               (condition-case err
-                                   (progn
-                                     (when (functionp value)
-                                       (setq value (funcall value)))
-                                     (pdd-resolve it value))
-                                 (error (pdd-reject it err))))))))
-     :signal (lambda ()
-               (if timer (cancel-timer timer))
-               (pdd-reject it 'cancel))
-     (puthash timer it pdd-task--timer-pool))))
+  (let ((callback (lambda (task)
+                    (condition-case err
+                        (progn
+                          (when (functionp value)
+                            (setq value (funcall value)))
+                          (pdd-resolve task value))
+                      (error (pdd-reject task err))))))
+    (if (eq time t)
+        (pdd-with-new-task
+         :signal (lambda (sig)
+                   (if sig
+                       (pdd-reject it sig)
+                     (funcall callback it))))
+      (pdd-with-new-task
+       (let* ((context (pdd--capture-dynamic-context))
+              (timer (run-at-time
+                      time nil (lambda ()
+                                 (pdd--with-restored-dynamic-context context
+                                   (funcall callback it))))))
+         :signal (lambda ()
+                   (if timer (cancel-timer timer))
+                   (pdd-reject it 'cancel))
+         (puthash timer it pdd-task--timer-pool))))))
 
 ;;;###autoload
 (cl-defun pdd-interval (secs count func &key init done fail fine)
