@@ -9,11 +9,13 @@ Each of them return a `pdd-task` object which can chain with other tasks.
 
 ## Usage
 
-Expire:
+Timeout:
 ```emacs-lisp
 (pdd-race
  (pdd-timeout 1.1)
  (pdd "https://httpbin.org/ip" #'print))
+
+(pdd-timeout 10 (pdd-all task1 task2 task3))
 ```
 
 Delay:
@@ -27,6 +29,25 @@ Delay:
   (lambda () (pdd "https://httpbin.org/ip" #'print))
   (lambda () (pdd-delay 5)) ; wait 5 seconds, non-block
   (lambda () (pdd "https://httpbin.org/uuid" #'print)))
+
+;; send signal to a delay task to resolve/reject it before timer triggerred
+
+(pdd-signal delay-task) ; when signal with nil, resolve it immediately
+(pdd-signal delay-task "the reason") ; else, reject with such reason
+
+;; When the first argument is t, this will behavior as a blocker
+;; The delay task will be pending forever until a signal is reached
+
+(defvar the-blocker nil)
+
+(pdd-chain t
+  (lambda (_) (pdd "https://httpbin.org/ip"))
+  (lambda (r) (setq the-blocker (pdd-delay t r))) ; block until other function signal it
+  (lambda (r) (pdd-exec [wc] :init (format "%s\n" r) :done 'print)))
+
+(if (> (random 9) 5)
+    (pdd-signal the-blocker) ; continue the task chain
+  (pdd-signal the-blocker "not-lucky")) ; reject the task chain
 ```
 
 Interval:
