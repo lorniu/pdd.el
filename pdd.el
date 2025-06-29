@@ -829,7 +829,7 @@ Returns response data in sync mode, task object in async mode."
   "An object represents Promise/A+ compliant promise with signal support.
 
 Slots of task:
-    status/1, values/2, reason/3, callbacks/4,
+    status/1, values/2, reasons/3, callbacks/4,
     signal-function/5, reject-handled-p/6, parent/7.
 
 VALUE of status:
@@ -891,9 +891,9 @@ this is just like funcall with arguments reversed."
 (defun pdd-resolve (&rest args)
   "Resolve an existed task or create a new resolved task.
 
-If (car ARGS) is `pdd-task' then resolve it with values is (cdr args).
+If (car ARGS) is `pdd-task' then resolve it with values as (cdr ARGS).
 
-Otherwise, create a new `pdd-task' which is rejected because of (car args)."
+Otherwise, create a new `pdd-task' which is fulfilled with ARGS."
   (declare (indent 1))
   (if (or (not (car args)) (not (pdd-task-p (car args))))
       (pdd-with-new-task
@@ -919,18 +919,18 @@ Otherwise, create a new `pdd-task' which is rejected because of (car args)."
 (defun pdd-reject (&rest args)
   "Reject an existed task or create a new rejected task.
 
-If (car ARGS) is `pdd-task' then reject it with reason (cadr args) and maybe
-with more metadata in (cddr args), such as execution context.
+If (car ARGS) is `pdd-task' then reject it with reasons as (cdr args).
 
-Otherwise, create a new `pdd-task' which is rejected because of ARGS."
+Otherwise, create a new `pdd-task' which is rejected with ARGS."
   (declare (indent 1))
   (if (or (not (car args)) (not (pdd-task-p (car args))))
       (pdd-with-new-task
        (aset it 1 'rejected)
        (aset it 3 args))
-    (let ((task (car args)) (reason (cdr args)))
-      (pdd-log 'task "  reject | %s, reason: %s" task reason)
-      (pdd-task--settle task 'rejected reason))))
+    ;; (pdd-reject task 1 2 3) => (pdd-then task nil (lambda (a b c) ...))
+    (let ((task (car args)) (reasons (cdr args)))
+      (pdd-log 'task "  reject | %s, reasons: %s" task reasons)
+      (pdd-task--settle task 'rejected reasons))))
 
 (defun pdd-signal (task &optional signal)
   "Send SIGNAL to TASK to run the proper signal function in task chain."
@@ -951,9 +951,9 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
               ;; default signal for cancel
               (pdd-reject target (or signal 'cancel)))))))))
 
-(defun pdd-task--settle (task status v)
-  "Settle TASK to STATUS with V is value or reason."
-  (pdd-with-vector (s values reason callbacks _ reject-handled-p) task
+(defun pdd-task--settle (task status val)
+  "Settle TASK to STATUS with VAL which is values or reasons."
+  (pdd-with-vector (s values reasons callbacks _ reject-handled-p) task
     (unless (eq s 'pending)
       (user-error "Cannot settle non-pending task"))
     (unless (memq status '(fulfilled rejected))
@@ -961,13 +961,13 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
     (aset task 5 nil) ; A settled task is no longer cancellable.
     (pcase (setf s status)
       ('fulfilled
-       (setf values v))
+       (setf values val))
       ('rejected
-       (setf reason v)
+       (setf reasons val)
        ;; used to catch the final unhandled rejection, the way like javascript
        (when (and (null callbacks)
                   (not reject-handled-p))
-         (run-with-idle-timer 0.1 nil #'pdd-task--reject-unhandled task v)))
+         (run-with-idle-timer 0.1 nil #'pdd-task--reject-unhandled task val)))
       (_ (user-error "Wrong status settled")))
     (while callbacks
       (let* ((cb (pop callbacks))
@@ -984,14 +984,15 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
   (when callback
     (cl-destructuring-bind (on-fulfilled on-rejected child-task context) callback
       (condition-case err1
-          (pdd-with-vector (status values reason) task
+          (pdd-with-vector (status values reasons) task
             (cl-macrolet ((chain-task-with-signal-propagation (&rest args)
                             `(let ((user-signal-fn (aref child-task 5)))
                                ;; Make sure signal can reach the running task
                                (aset child-task 5
                                      (lambda (sig target)
                                        (if (functionp user-signal-fn)
-                                           (pdd-funcall user-signal-fn (list sig target))
+                                           (pdd--with-restored-dynamic-context context
+                                             (pdd-funcall user-signal-fn (list sig target)))
                                          (pdd-reject child-task 'cancel))
                                        (pdd-signal result sig)))
                                ;; Bind then dynamically
@@ -1014,11 +1015,11 @@ Otherwise, create a new `pdd-task' which is rejected because of ARGS."
                 ('rejected
                  (if (functionp on-rejected)
                      (let ((result (pdd--with-restored-dynamic-context context
-                                     (pdd-funcall on-rejected reason))))
+                                     (pdd-funcall on-rejected reasons))))
                        (if (pdd-task-p result)
                            (chain-task-with-signal-propagation)
                          (pdd-resolve child-task result)))
-                   (apply #'pdd-reject child-task reason)))))
+                   (apply #'pdd-reject child-task reasons)))))
             (pdd-log 'task "        -> %s" task))
         (error (pdd-reject child-task err1))))))
 
@@ -1154,26 +1155,28 @@ NOTICE: variable `pdd-sync' always be nil in the inner context."
   (maphash (lambda (k _) (cancel-timer k)) pdd-task--timer-pool)
   (clrhash pdd-task--timer-pool))
 
-(defun pdd--wrap-task-handlers (task done fail fine &optional fine-arg)
-  "Wrap TASK with DONE/FAIL handlers and with FINE/FINE-ARG for cleanup."
-  (pdd-then task
-    (if (and done (not (functionp done)))
-        (lambda ()
-          (unwind-protect done
-            (if fine (pdd-funcall fine (list fine-arg)))))
-      (let ((args (pdd-function-arguments (or done #'identity))))
-        `(lambda ,args
-           (unwind-protect
-               (,(or done #'identity) ,@args)
-             (if ,fine (pdd-funcall ,fine (list ,fine-arg)))))))
-    (lambda (reason &optional context)
-      (unwind-protect
-          (if (functionp fail)
-              (pdd-funcall fail (list reason context))
-            (if (consp reason)
-                (signal (car reason) (cdr reason))
-              (user-error "%s" reason)))
-        (if fine (pdd-funcall fine (list fine-arg)))))))
+(defun pdd--wrap-task-handlers (task context done fail fine &optional fine-arg)
+  "Wrap TASK with DONE/FAIL in CONTEXT and use FINE/FINE-ARG for cleanup."
+  (let* ((fine-fn (lambda ()
+                    (pdd--with-restored-dynamic-context context
+                      (ignore-errors (pdd-funcall fine (list fine-arg))))))
+         (wrapper (lambda (handler)
+                    (let ((args (pdd-function-arguments handler)))
+                      (eval `(lambda ,args
+                               (unwind-protect
+                                   (let ((context ',context))
+                                     (pdd--with-restored-dynamic-context context
+                                       (funcall ,(if (symbolp handler) (list 'function handler) handler) ,@args)))
+                                 (,fine-fn)))
+                            t)))))
+    (pdd-then task
+      (funcall wrapper (or done #'identity))
+      (if (functionp fail)
+          (funcall wrapper fail)
+        (when fine
+          (lambda (reason)
+            (funcall fine-fn)
+            (signal 'error (list reason))))))))
 
 ;;;###autoload
 (defun pdd-timeout (time &optional task)
@@ -1213,28 +1216,25 @@ Examples:
 
   (pdd-delay 3 (lambda () (message \"> %s\" (float-time))))"
   (declare (indent 1))
-  (let ((callback (lambda (task)
-                    (condition-case err
-                        (progn
-                          (when (functionp value)
-                            (setq value (funcall value)))
-                          (pdd-resolve task value))
-                      (error (pdd-reject task err))))))
+  (let* ((context (pdd--capture-dynamic-context))
+         (callback (lambda (task)
+                     (condition-case err
+                         (progn
+                           (when (functionp value)
+                             (pdd--with-restored-dynamic-context context
+                               (setq value (funcall value))))
+                           (pdd-resolve task value))
+                       (error (pdd-reject task err))))))
     (if (eq time t)
         (pdd-with-new-task
          :signal (lambda (sig)
-                   (if sig
-                       (pdd-reject it sig)
+                   (if sig (pdd-reject it sig)
                      (funcall callback it))))
       (pdd-with-new-task
-       (let* ((context (pdd--capture-dynamic-context))
-              (timer (run-at-time
-                      time nil (lambda ()
-                                 (pdd--with-restored-dynamic-context context
-                                   (funcall callback it))))))
-         :signal (lambda ()
+       (let ((timer (run-at-time time nil (lambda () (funcall callback it)))))
+         :signal (lambda (sig)
                    (if timer (cancel-timer timer))
-                   (pdd-reject it 'cancel))
+                   (if sig (pdd-reject it sig) (funcall callback it)))
          (puthash timer it pdd-task--timer-pool))))))
 
 ;;;###autoload
@@ -1305,7 +1305,7 @@ Example:
                        (if (timerp timer)
                            (cancel-timer timer))
                        (if rejected-p
-                           (pdd-reject task v context)
+                           (pdd-reject task v)
                          (pdd-resolve task v n)))))
      (unless count (setq count 1))
      (when init
@@ -1325,7 +1325,7 @@ Example:
                                (pdd-funcall func (list n return-fn timer)))))
                        (error (funcall return-fn err t))))))
      :signal (lambda () (funcall return-fn 'cancel t))
-     (setq it (pdd--wrap-task-handlers it done fail fine timer))
+     (setq it (pdd--wrap-task-handlers it context done fail fine timer))
      (puthash timer it pdd-task--timer-pool))))
 
 ;;;###autoload
@@ -1483,7 +1483,7 @@ or return the result directly when SYNC is t."
                             (if (functionp fail) (setq result (pdd-funcall fail (list reason))) (error "%s" reason))))))
                   (when (buffer-live-p proc-buffer) (kill-buffer proc-buffer))
                   (when (and proc (process-live-p proc)) (delete-process proc))
-                  (if fine (pdd-funcall fine (list proc))))
+                  (if (functionp fine) (pdd-funcall fine (list proc))))
                 result)
 
             ;; --- Asynchronous ---
@@ -1498,7 +1498,9 @@ or return the result directly when SYNC is t."
                     (filter-fn (lambda (p string)
                                  (with-current-buffer (process-buffer p)
                                    (insert (ansi-color-apply string))
-                                   (if peek (pdd-funcall peek (list string p))))))
+                                   (when peek
+                                     (pdd--with-restored-dynamic-context context
+                                       (pdd-funcall peek (list string p)))))))
                     (sentinel-fn (lambda (p event)
                                    (with-current-buffer (process-buffer p)
                                      (pdd-log 'cmd "event: %s" event)
@@ -1511,27 +1513,27 @@ or return the result directly when SYNC is t."
                                              (setq exit-status 0)))
                                            (cond
                                             (killed-by-user
-                                             (pdd-reject task 'process-canceled context))
+                                             (pdd-reject task 'process-canceled))
                                             ((and exit-status (/= exit-status 0))
-                                             (pdd-reject task (format "Exit %d. %s" exit-status (buffer-string)) context))
+                                             (pdd-reject task (format "Exit %d. %s" exit-status (buffer-string))))
                                             (t
-                                             (pdd--with-restored-dynamic-context context
-                                               (let ((result (cond ((eq as 'line) (funcall as-line-fn))
-                                                                   ((functionp as) (funcall as))
-                                                                   (t (buffer-string)))))
-                                                 (pdd-resolve task result exit-status))))))
+                                             (let ((result
+                                                    (pdd--with-restored-dynamic-context context
+                                                      (cond ((eq as 'line) (funcall as-line-fn))
+                                                            ((functionp as) (funcall as))
+                                                            (t (buffer-string))))))
+                                               (pdd-resolve task result exit-status)))))
                                        (when (buffer-live-p (current-buffer))
-                                         (kill-buffer (current-buffer)))
-                                       (if fine (pdd-funcall fine (list proc))))))))
+                                         (kill-buffer (current-buffer))))))))
                (condition-case err
                    (progn
                      (pdd-log 'cmd "%s: %s %s" proc-name cmd-args proc-envs)
                      (setq proc (make-process :name proc-name :command cmd-args :buffer proc-buffer
                                               :filter filter-fn :sentinel sentinel-fn))
                      (funcall init-proc proc))
-                 (error (pdd-reject task (format "Process creation failed: %s" err) context)))
+                 (error (pdd-reject task (format "Process creation failed: %s" err))))
                :signal signal-fn
-               (setq it (pdd--wrap-task-handlers it done fail fine proc))))))))))
+               (setq it (pdd--wrap-task-handlers it context done fail fine proc))))))))))
 
 ;; Async/Await
 
