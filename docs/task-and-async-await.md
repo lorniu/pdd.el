@@ -28,7 +28,7 @@ Once you have a `pdd-task` instance, forget the asynchronous process itself, jus
 *  Register callbacks to handle the task's settlement with **`(pdd-then task on-fulfilled on-rejected)`**:
    * `on-fulfilled`: A function auto executed when task becomes `fulfilled`, with `data` as argument.
    * `on-rejected`: A function auto executed when task becomes `rejected`, with fail `reason` as argument.
-*  After register, `pdd-then` returns a *new* `pdd-task`. You can call `pdd-then` again and again on new task, so a **task chain** is created. Values (on success) or errors (on failure) propagate through this chain.
+*  After register, `pdd-then` returns a *new* `pdd-task`. You can call `pdd-then` again and again on new task, so a **task chain** is created. Values (on success) or reasons (on failure) propagate through this chain.
 *  If an `on-fulfilled` callback returns another `pdd-task`, the chain automatically waits for *that* inner task to settle, and its result (or error) is passed down the main chain. This **flattens nested callbacks**. This is the biggest benefit of using tasks.
 
 As you can see, the core functions are `pdd-task`, `pdd-resolve`, `pdd-reject` and `pdd-then`. Also there are some auxiliary helpers or utilities, they are necessary for different scenarios:
