@@ -1025,7 +1025,7 @@ Otherwise, create a new `pdd-task' which is rejected with ARGS."
 (defun pdd-task--reject-unhandled (task error)
   "Default TASK rejection function when ERROR unhandled at last."
   (pdd--with-restored-dynamic-context (cadr error)
-    (when (and pdd-default-error-handler
+    (when (and (functionp pdd-default-error-handler)
                (eq (aref task 1) 'rejected) ; still rejected
                (not (aref task 6))) ; still not handled
       (pdd-funcall pdd-default-error-handler (list (car error) nil)))))
@@ -1307,7 +1307,7 @@ Example:
                            (pdd-reject task v)
                          (pdd-resolve task v n)))))
      (unless count (setq count 1))
-     (when init
+     (when (functionp init)
        (run-at-time 0 nil (lambda () (pdd-funcall init (list timer)))))
      (setq timer
            (run-at-time
@@ -1497,7 +1497,7 @@ or return the result directly when SYNC is t."
                     (filter-fn (lambda (p string)
                                  (with-current-buffer (process-buffer p)
                                    (insert (ansi-color-apply string))
-                                   (when peek
+                                   (when (functionp peek)
                                      (pdd--with-restored-dynamic-context context
                                        (pdd-funcall peek (list string p)))))))
                     (sentinel-fn (lambda (p event)
@@ -1800,7 +1800,7 @@ to be called when task is acquired."
             (setf waiting (nconc waiting (list task-pair)))
             (aset task 5 (lambda (&optional signal-sym)
                            (funcall handler signal-sym)
-                           (when signal-fn
+                           (when (functionp signal-fn)
                              (pdd-funcall signal-fn (list signal-sym)))))))))))
 
 (defun pdd-queue-release (queue task)
@@ -1808,7 +1808,7 @@ to be called when task is acquired."
   (with-slots (running waiting fine) queue
     (setf running (delq task running))
     (pdd-queue--process-waiting queue)
-    (when (and fine (null running) (null waiting))
+    (when (and (functionp fine) (null running) (null waiting))
       (pdd-funcall fine (list queue task)))))
 
 ;; Cookie
@@ -2173,7 +2173,7 @@ Otherwise, delete only the item."
     (let ((init1 init))
       (setf init
             (lambda ()
-              (when init1
+              (when (functionp init1)
                 (pdd-funcall init1 (list request))))))))
 
 (cl-defmethod pdd-transform-req-done ((request pdd-http-request))
@@ -2214,7 +2214,7 @@ Otherwise, delete only the item."
     (let ((peek1 peek))
       (setf peek
             (lambda ()
-              (when peek1
+              (when (functionp peek1)
                 (if abort-flag
                     (pdd-log 'peek "skip peek (aborted).")
                   (with-slots (abort-flag fail) request
@@ -2531,7 +2531,7 @@ ARGS should a request instances or keywords to build the request."
                 (if (or sync (null real-queue) (memq task (oref real-queue running))) ; for retry logic
                     (let ((result (progn
                                     (pdd-log 'pdd:around "dispatch to %s..." backend)
-                                    (if init (funcall init))
+                                    (if (functionp init) (funcall init))
                                     (setf abort-flag nil begtime (float-time))
                                     (cl-call-next-method backend :request request))))
                       (if sync result (setf process result) task))
@@ -2540,7 +2540,7 @@ ARGS should a request instances or keywords to build the request."
                          (callback (lambda ()
                                      (pdd--with-restored-dynamic-context context
                                        (pdd-log 'pdd:around "dispatch to %s..." backend)
-                                       (if init (funcall init))
+                                       (if (functionp init) (funcall init))
                                        (setf abort-flag nil begtime (float-time))
                                        (setf process (cl-call-next-method backend :request request))))))
                     (pdd-log 'queue "acquire queue: %s" real-queue)
@@ -2821,12 +2821,11 @@ ARGS should a request instances or keywords to build the request."
             (when (numberp timeout)
               (let ((timer-callback
                      (lambda ()
-                       (let ((proc (oref request process)) buf)
+                       (let ((proc (oref request process)) buf kill-buffer-query-functions)
                          (when (and (not final-buffer) (not abort-flag) proc)
                            (pdd--with-restored-dynamic-context context
                              (setf abort-flag 'timeout)
                              (ignore-errors (setq buf (process-buffer proc)))
-                             (ignore-errors (stop-process proc))
                              (ignore-errors (delete-process proc))
                              (ignore-errors (kill-buffer buf))
                              (pdd-log 'timeout "TIMEOUT timer triggered")
@@ -2930,7 +2929,7 @@ Or switch http backend to `pdd-url-backend' instead:\n
             (if proxy (append proxy plz-curl-default-args) plz-curl-default-args))
            (context (pdd--capture-dynamic-context))
            (filter
-            (when peek
+            (when (functionp peek)
               (lambda (proc string)
                 (with-current-buffer (process-buffer proc)
                   (save-excursion
