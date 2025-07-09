@@ -634,10 +634,9 @@ Besides globally set, it also can be dynamically binding in let.")
 
 (defvar pdd-done nil)
 
-(defvar pdd-fail t
-  "This can be nil, t or a function.
-Value t for redirecting to default error handler.
-Value nil for resolving task as nil.")
+(defvar pdd-fail nil
+  "This can be nil for not handled or a function as handler.
+Don't change it globally, use as a lexical binding variable if needed.")
 
 (defvar pdd-fine nil)
 
@@ -2279,7 +2278,6 @@ Otherwise, delete only the item."
                       (pdd backend request))
                   ;; really fail
                   (pdd-log 'fail "%s" err)
-                  (unless fail-user (setq fail-user #'ignore))
                   (unwind-protect
                       (if (pdd-task-p task)
                           ;; [async] Chain to then
