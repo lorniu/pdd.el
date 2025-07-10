@@ -448,16 +448,19 @@ Return a plist containing all cookie attributes."
   "Get signature of FUNCTION with cache enabled."
   (pdd-with-cache (list 'signature function)
     :common t
-    (cond
-     ((eq (car-safe function) 'lambda) (cadr function))
-     ((byte-code-function-p function)
-      (let* ((doc (downcase (documentation function))) ; assume all args are downcase
-             (arglist-from-doc
-              (ignore-errors
-                (when (and doc (string-match "\n\n(fn\\s-+.*\n?)$" doc))
-                  (cdar (read-from-string (match-string 0 doc)))))))
-        (or arglist-from-doc (help-function-arglist function))))
-     (t (help-function-arglist function)))))
+    (condition-case err
+        (cond ((eq (car-safe function) 'lambda) (cadr function))
+              ((byte-code-function-p function)
+               (let* ((doc (documentation function))
+                      (arglist-from-doc
+                       (ignore-errors
+                         (if doc (setq doc (downcase doc))) ; assume all args are downcase
+                         (when (string-match "\n\n(fn\\s-+.*\n?)$" doc)
+                           (cdar (read-from-string (match-string 0 doc)))))))
+                 (or arglist-from-doc (help-function-arglist function))))
+              (t (help-function-arglist function)))
+      (error (pdd-log 'pdd-function-arglist "%s" err)
+             (signal (car err) (cdr err))))))
 
 (defun pdd-function-arguments (function)
   "Return the required argument list of FUNCTION to build decorate function."
