@@ -499,7 +499,8 @@ Example:
 (cl-defgeneric pdd-string-to-object (_type string)
   "Convert STRING to an Elisp object based on the specified content TYPE."
   (:method ((_ (eql 'json)) string)
-           (json-parse-string string :object-type 'alist))
+           (unless (string-blank-p string)
+             (json-parse-string string :object-type 'alist)))
   (:method ((_ (eql 'dom)) string)
            (with-temp-buffer
              (insert string)
