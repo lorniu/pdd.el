@@ -2805,8 +2805,9 @@ ARGS should a request instances or keywords to build the request."
                                                   (setq final-data (funcall fail err)))
                                          (pdd-log 'url-backend "before done")
                                          (setq final-data (pdd-funcall done (pdd-transform-response request))))
-                                     (error (when sync ; avoid fail in filter prefix output
-                                              (setq final-data `(:error ,@(cdr err1))))))))
+                                     (error (if sync ; avoid fail in filter prefix output
+                                                (setq final-data `(:error ,@(cdr err1)))
+                                              (funcall fail err1))))))
                              (kill-buffer final-buffer)))))
           (setq init-buffer (url-retrieve url final-cb nil t t)
                 init-process (get-buffer-process init-buffer))
