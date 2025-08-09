@@ -509,6 +509,7 @@ Example:
            (with-temp-buffer
              (insert string)
              (libxml-parse-xml-region (point-min) (point-max))))
+  (declare (indent 1))
   string)
 
 (cl-defgeneric pdd-object-to-string (type _object)
@@ -1477,6 +1478,11 @@ or return the result directly when SYNC is t."
                       (let ((exit-status (process-exit-status proc)))
                         (if (and exit-status (= exit-status 0))
                             (let ((raw (with-current-buffer proc-buffer
+                                         (save-excursion
+                                           (goto-char (point-max))
+                                           (forward-line -1)
+                                           (when (looking-at "^Process.*finished$")
+                                             (delete-region (max (point-min) (1- (point))) (point-max))))
                                          (cond ((eq as 'line) (funcall as-line-fn))
                                                ((functionp as) (funcall as))
                                                (t (buffer-string))))))
